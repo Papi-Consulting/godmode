@@ -60,11 +60,11 @@ Prefer simple, boring implementation over clever abstractions.
 ### Issue-to-PR Loop
 
 1. Karan or the head role selects an issue/task.
-2. Builder reads this harness, `docs/spec.md`, and the issue.
+2. Builder starts a fresh session for the task, then reads this harness, `docs/spec.md`, the issue, and relevant docs/comments.
 3. Builder creates a branch, implements, verifies, pushes, and opens a PR.
-4. Once a PR is detected, Reviewer A and Reviewer B automatically review.
-5. If blockers are found, the builder automatically receives accepted blockers, fixes them, pushes, and comments on the PR.
-6. Reviewers re-review after fix commits.
+4. Once a PR is detected, Reviewer A and Reviewer B start fresh review sessions, read `AGENTS.md`, the PR, linked issues, comments, and relevant docs, then review.
+5. If blockers are found, the builder starts a fresh fix session, receives accepted blockers, fixes them, pushes, and comments on the PR.
+6. Reviewers start fresh re-review sessions after fix commits and re-read PR state before responding.
 7. Loop continues until merge-ready, max cycles, failure, pause, or human intervention.
 8. Karan retains final merge authority. No automatic merge to `main` in v1.
 

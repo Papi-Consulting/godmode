@@ -82,11 +82,11 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 
 1. Operator opens GodMode on a local repo/harness.
 2. Operator selects or specs an issue.
-3. Builder is told to work on the issue and read the harness.
+3. Builder starts a fresh session for the task, then reads the harness, spec, issue, and relevant docs/comments before implementing.
 4. Builder opens a PR.
-5. Reviewers automatically review.
-6. If blockers exist, builder automatically fixes and comments.
-7. Reviewers re-review after fix commits.
+5. Reviewers automatically start fresh review sessions and read `AGENTS.md`, the PR, linked issues, comments, and relevant docs before reviewing.
+6. If blockers exist, builder starts a fresh fix session, receives accepted blockers, fixes them, pushes, and comments on the PR.
+7. Reviewers start fresh re-review sessions after fix commits and re-read the PR state before responding.
 8. Loop continues until merge-ready, max cycles, failure, pause, or human intervention.
 9. Operator manually approves/merges or asks for more changes.
 
@@ -109,11 +109,11 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 
 | Question | Status |
 | --- | --- |
-| Hermes integration: CLI subprocess, API, MCP/ACP, or in-dashboard adapter? | Open |
-| Codex default mode: interactive PTY or one-shot exec? | Open |
-| Should reviewer findings be dashboard-only first or posted to GitHub comments in v1? | Open |
-| Default max fix cycles: 2 or 3? | Recommend 2 until dogfooding says otherwise |
-| Manual merge only in v1 or optional approved merge button? | Manual merge first |
+| Hermes integration: CLI subprocess, API, MCP/ACP, or in-dashboard adapter? | Prefer CLI for v1; keep adapter boundary flexible until dogfooding clarifies pros/cons. |
+| Codex default mode: interactive PTY or one-shot exec? | Try one-shot exec for v1 review runs; every run must first load relevant docs, issues, PRs, and comments. |
+| Should reviewer findings be dashboard-only first or posted to GitHub comments in v1? | Post reviewer findings as GitHub PR comments in v1. |
+| Default max fix cycles: 2 or 3? | Use 3 until dogfooding says otherwise. |
+| Manual merge only in v1 or optional approved merge button? | Manual merge only in v1. |
 
 ## Spec Drift Convention
 

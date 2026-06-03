@@ -33,7 +33,7 @@ roles:
 workflow:
   auto_start_reviewers_after_pr: true
   auto_send_blockers_to_builder: true
-  max_fix_cycles: 2
+  max_fix_cycles: 3
   auto_merge: false
 
 agents:
@@ -48,4 +48,4 @@ agents:
   codex:
     adapter: cli
     command: codex
-    mode: oneshot_or_interactive
+    mode: oneshot
