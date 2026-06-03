@@ -1,0 +1,51 @@
+# GodMode Project Config
+
+project:
+  name: GodMode
+  default_branch: main
+
+harness:
+  agents_file: AGENTS.md
+  spec_file: docs/spec.md
+  product_spec_file: docs/godmode-v1-product-spec.md
+
+roles:
+  head:
+    agent: hermes
+    pane: head
+    display_name: Hermes
+  builder:
+    agent: claude-code
+    pane: builder
+    display_name: Claude Code
+  reviewers:
+    - id: reviewer-a
+      agent: codex
+      pane: reviewer_a
+      display_name: Codex A
+      role_doc: docs/review/reviewer-a-correctness.md
+    - id: reviewer-b
+      agent: codex
+      pane: reviewer_b
+      display_name: Codex B
+      role_doc: docs/review/reviewer-b-architecture.md
+
+workflow:
+  auto_start_reviewers_after_pr: true
+  auto_send_blockers_to_builder: true
+  max_fix_cycles: 2
+  auto_merge: false
+
+agents:
+  hermes:
+    adapter: cli
+    command: hermes
+    mode: interactive
+  claude-code:
+    adapter: cli
+    command: claude
+    mode: interactive
+  codex:
+    adapter: cli
+    command: codex
+    mode: oneshot_or_interactive
