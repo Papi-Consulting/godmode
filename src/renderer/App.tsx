@@ -1,41 +1,24 @@
+import { useEffect, useState } from 'react';
+import type { AgentRole, ProjectConfigState, RolePaneConfig } from '../shared/types.js';
 import { AgentPane } from './components/AgentPane.js';
 import { GithubPane } from './components/GithubPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
 
-const panes = [
-  {
-    id: 'head',
-    role: 'HEAD',
-    agent: 'Hermes',
-    commandHint: 'hermes',
-    phase: 'orchestrating',
-    accent: 'blue',
-  },
-  {
-    id: 'builder',
-    role: 'BUILDER',
-    agent: 'Claude Code',
-    commandHint: 'claude',
-    phase: 'ready',
-    accent: 'cyan',
-  },
-  {
-    id: 'reviewer_a',
-    role: 'REV A',
-    agent: 'Codex',
-    commandHint: 'codex',
-    phase: 'watching',
-    accent: 'violet',
-  },
-  {
-    id: 'reviewer_b',
-    role: 'REV B',
-    agent: 'Codex',
-    commandHint: 'codex',
-    phase: 'watching',
-    accent: 'amber',
-  },
-];
+// UI-only presentation hints keyed by generic pane id. Kept in the renderer so
+// config stays focused on roles/agents, not styling.
+const ACCENT_BY_PANE: Record<AgentRole, string> = {
+  head: 'blue',
+  builder: 'cyan',
+  reviewer_a: 'violet',
+  reviewer_b: 'amber',
+};
+
+const PHASE_BY_PANE: Record<AgentRole, string> = {
+  head: 'orchestrating',
+  builder: 'ready',
+  reviewer_a: 'watching',
+  reviewer_b: 'watching',
+};
 
 const chatEvents = [
   {
@@ -72,6 +55,34 @@ const schedulerLines = [
 ];
 
 export function App() {
+  const [config, setConfig] = useState<ProjectConfigState | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const load = () =>
+      void window.godmode?.getConfig().then((next) => {
+        if (active && next) setConfig(next);
+      });
+    load();
+    const off = window.godmode?.onProjectChanged(() => load());
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, []);
+
+  const rolePanes: RolePaneConfig[] = config?.panes ?? [];
+  const panes = rolePanes.map((pane) => ({
+    id: pane.paneId,
+    role: pane.roleLabel,
+    agent: pane.displayName,
+    commandHint: pane.commandHint,
+    roleDoc: pane.roleDoc,
+    phase: PHASE_BY_PANE[pane.paneId] ?? 'idle',
+    accent: ACCENT_BY_PANE[pane.paneId] ?? 'blue',
+  }));
+  const bindingSummary = rolePanes.map((pane) => `${pane.paneId}: ${pane.agentId}`).join(' · ');
+
   return (
     <div className="app-frame">
       <aside className="rail" aria-label="Project switcher">
@@ -161,8 +172,17 @@ export function App() {
                 <span className="section-kicker">Agent Terminals</span>
                 <strong>Role-bound CLIs</strong>
               </div>
-              <span className="header-chip success">PTY ready</span>
+              {config ? (
+                <span className={`header-chip ${config.status === 'loaded' ? 'success' : ''}`}>
+                  {config.source === 'config' ? 'config loaded' : `${config.status} · defaults`}
+                </span>
+              ) : null}
             </header>
+            {config?.error ? (
+              <p className="config-error" role="alert">
+                {config.error}
+              </p>
+            ) : null}
             <div className="terminal-grid">
               {panes.map((pane) => (
                 <AgentPane key={pane.id} {...pane} />
@@ -201,7 +221,7 @@ export function App() {
                   <span className="section-kicker">Agent Models</span>
                   <button>Configure</button>
                 </header>
-                <p>mock bindings · head: hermes · builder: claude-code · reviewer_a: codex · reviewer_b: codex</p>
+                <p>{bindingSummary ? `bindings · ${bindingSummary}` : 'no role bindings loaded'}</p>
               </div>
               <div className="stack-section">
                 <header>

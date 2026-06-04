@@ -10,9 +10,10 @@ type AgentPaneProps = {
   commandHint: string;
   phase: string;
   accent: string;
+  roleDoc?: string;
 };
 
-export function AgentPane({ id, role, agent, commandHint, phase, accent }: AgentPaneProps) {
+export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc }: AgentPaneProps) {
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -41,6 +42,7 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent }: Agent
     term.writeln(`GodMode ${role} · ${agent}`);
     term.writeln(`$ ${commandHint} --project <selected-project>`);
     term.writeln(`phase=${phase} adapter=cli`);
+    if (roleDoc) term.writeln(`role-doc=${roleDoc}`);
     term.writeln('');
 
     terminalRef.current = term;
@@ -76,7 +78,7 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent }: Agent
       term.dispose();
       terminalRef.current = null;
     };
-  }, [agent, commandHint, id, phase, role]);
+  }, [agent, commandHint, id, phase, role, roleDoc]);
 
   async function startShell() {
     setStatus('running');
@@ -99,6 +101,11 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent }: Agent
           <span className="status-dot" />
           <strong>{role}</strong>
           <span>{agent}</span>
+          {roleDoc ? (
+            <span className="agent-doc" title={roleDoc}>
+              {roleDoc}
+            </span>
+          ) : null}
         </div>
         <div className="agent-actions">
           <span>{phase}</span>

@@ -75,6 +75,17 @@ GodMode opens on a selected project root (resolved and validated in the Electron
 
 Required: `AGENTS.md` plus `README.md` or `docs/spec.md`. Optional (reported but non-gating): `.agentic/godmode.yaml`, `docs/review/`, `docs/friction/`. Detection is path-relative to the selected root, not hardcoded to GodMode's own layout. PTY sessions launch with the selected root as their working directory.
 
+## Role/Agent Config
+
+The Electron main process loads `.agentic/godmode.yaml` from the selected project root, validates it with Zod, and sends a sanitized, renderer-facing view over IPC (`godmode:config:get`). The renderer derives pane labels, display names, command hints, and role docs from this config; it re-loads whenever the selected project changes (`godmode:project:changed`). Config resolves to one of:
+
+- `loaded` — file present and valid; panes come from config.
+- `default` — no file found; panes fall back to built-in safe defaults.
+- `invalid` — file present but failed parse/validation; the error is surfaced in the UI and panes fall back to defaults (never crashing).
+- `unreadable` — the selected root could not be read.
+
+Role and pane keys stay generic (`head`/`builder`/`reviewer_a`/`reviewer_b`). Hermes/Claude/Codex appear only as default display names and command hints, never as core identifiers. Command hints render project-agnostically (`<selected-project>`) until real selected-project command wiring exists.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:

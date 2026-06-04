@@ -67,6 +67,52 @@ export type ProjectState = {
   harness: ProjectHarnessState;
 };
 
+/**
+ * Outcome of loading `.agentic/godmode.yaml` for the selected project.
+ * - `loaded`: config file present and valid; panes come from config.
+ * - `default`: no config file found; panes fall back to safe defaults.
+ * - `invalid`: config file present but failed parse/validation; panes fall
+ *   back to safe defaults and `error` describes what was wrong (non-crashing).
+ * - `unreadable`: no project selected or the root could not be read.
+ */
+export type ConfigStatus = 'loaded' | 'default' | 'invalid' | 'unreadable';
+
+/**
+ * A single role pane derived from config (or defaults). Pane/role keys stay
+ * generic (`head`/`builder`/`reviewer_a`/`reviewer_b`); Hermes/Claude/Codex only
+ * ever appear as display names or command hints, never as core identifiers.
+ */
+export type RolePaneConfig = {
+  /** Pane id used by the PTY/IPC layer. Matches AgentRole. */
+  paneId: AgentRole;
+  /** Generic role key. */
+  roleKey: AgentRole;
+  /** Short display label, e.g. "HEAD" or "REV A". */
+  roleLabel: string;
+  /** Human display name from config, e.g. "Hermes". */
+  displayName: string;
+  /** Agent id this pane is bound to, e.g. "hermes". */
+  agentId: string;
+  /** Base command hint for the bound agent, e.g. "hermes". */
+  commandHint: string;
+  /** Reviewer id (e.g. "reviewer-a") for reviewer roles. */
+  reviewerId?: string;
+  /** Project-relative role doc path, if configured. */
+  roleDoc?: string;
+};
+
+/** Sanitized, renderer-facing view of the loaded role/agent config. */
+export type ProjectConfigState = {
+  status: ConfigStatus;
+  /** Whether panes were derived from config or from built-in defaults. */
+  source: 'config' | 'default';
+  /** Set when status is `invalid` or `unreadable`. */
+  error?: string;
+  /** Project display name (from config, falling back to the root basename). */
+  projectName?: string;
+  panes: RolePaneConfig[];
+};
+
 export type RunStatus =
   | 'idle'
   | 'issue_selected'
