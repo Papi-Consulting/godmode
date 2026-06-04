@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { getGithubState } from './github.js';
 import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, writeToPtySession } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 
@@ -111,6 +112,8 @@ app.whenReady().then(() => {
     if (result.canceled || result.filePaths.length === 0) return undefined;
     return selectProjectAndResetSessions(result.filePaths[0]);
   });
+
+  ipcMain.handle('godmode:github:get', () => getGithubState(getSelectedProjectRoot(), new Date().toISOString()));
 
   ipcMain.handle('godmode:pty:start', (event, input: unknown) => {
     const payload = parseIpcPayload(ptyStartSchema, input);

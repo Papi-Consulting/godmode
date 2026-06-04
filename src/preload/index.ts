@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { PtyExit } from '../main/pty.js';
-import type { ProjectState } from '../shared/types.js';
+import type { GithubState, ProjectState } from '../shared/types.js';
 
 export type PtyDataEvent = {
   paneId: string;
@@ -17,6 +17,7 @@ const api = {
   selectProject: (input: { path: string }) =>
     ipcRenderer.invoke('godmode:project:select', input) as Promise<ProjectState | undefined>,
   browseProject: () => ipcRenderer.invoke('godmode:project:browse') as Promise<ProjectState | undefined>,
+  getGithub: () => ipcRenderer.invoke('godmode:github:get') as Promise<GithubState>,
   startPty: (input: { paneId: string }) =>
     ipcRenderer.invoke('godmode:pty:start', input) as Promise<{ paneId: string; pid: number } | undefined>,
   writePty: (input: { paneId: string; data: string }) => ipcRenderer.send('godmode:pty:write', input),

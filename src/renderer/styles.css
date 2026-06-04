@@ -354,6 +354,11 @@ p {
   color: var(--green);
 }
 
+.header-chip.error {
+  border-color: rgba(255, 99, 125, 0.52);
+  color: var(--red);
+}
+
 .chat-panel {
   border-color: rgba(114, 166, 255, 0.86);
   box-shadow: inset 0 0 0 1px rgba(49, 93, 255, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.08);
@@ -584,10 +589,54 @@ p {
   color: var(--brand-bright);
 }
 
+/*
+ * The pane is a fixed header + scrolling body + fixed footer. The body owns the
+ * only scroll region so the footer (Refresh / merge gate) can never overlap the
+ * issue/PR/review rows regardless of how much real data arrives.
+ */
 .github-pane {
   grid-column: 1;
   grid-row: 2;
+  overflow: hidden;
+}
+
+.github-body {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
+}
+
+.repo-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.repo-name {
+  color: #dfe6ef;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-branch {
+  color: var(--cyan);
+}
+
+.github-guidance {
+  margin: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  background: rgba(255, 99, 125, 0.08);
+  color: #f2c3cc;
+  font-size: 0.72rem;
+  line-height: 1.4;
 }
 
 .github-columns {
@@ -621,70 +670,212 @@ p {
 
 .feed-list li {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr);
+  grid-template-columns: 12px auto minmax(0, 1fr) auto;
   align-items: center;
+  gap: 6px;
   min-height: 25px;
   color: #c8d0dc;
   font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.69rem;
+}
+
+.feed-num {
+  color: var(--text-soft);
+}
+
+.feed-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.batch-panel {
-  min-height: 0;
-  flex: 1;
+.feed-meta {
   display: flex;
-  flex-direction: column;
-}
-
-.batch-list {
-  display: grid;
-  gap: 8px;
-  padding: 12px 10px;
-}
-
-.batch-row {
-  display: grid;
-  grid-template-columns: 44px 150px minmax(170px, 1fr) 168px;
   align-items: center;
-  gap: 10px;
-  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.68rem;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 0.64rem;
+  white-space: nowrap;
 }
 
-.batch-row > span {
+.empty-line {
+  margin: 0;
+  padding: 8px 10px 12px;
+  color: var(--text-dim);
+  font-size: 0.69rem;
+}
+
+.status-dot.pr-open {
+  background: var(--cyan);
+}
+
+.status-dot.pr-draft {
+  background: var(--text-soft);
+}
+
+.status-dot.pr-merged {
+  background: var(--violet);
+}
+
+.status-dot.pr-closed {
+  background: var(--red);
+}
+
+.pr-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--text-soft);
 }
 
-.batch-row strong {
+.pr-tag.pr-open {
+  color: var(--cyan);
+  border-color: rgba(95, 211, 255, 0.4);
+}
+
+.pr-tag.pr-merged {
+  color: var(--violet);
+  border-color: rgba(167, 139, 250, 0.4);
+}
+
+.pr-tag.pr-closed {
+  color: var(--red);
+  border-color: rgba(255, 99, 125, 0.4);
+}
+
+.pr-tag.decision {
+  color: #d8dee8;
+}
+
+/* Active PR for the current branch — the manual merge gate's focal point. */
+.active-pr {
+  border-bottom: 1px solid var(--line);
+  background: rgba(114, 166, 255, 0.04);
+}
+
+.active-pr-body {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.active-pr-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #dfe6ef;
+}
+
+.active-pr-title .feed-title {
+  flex: 1;
+}
+
+.active-pr-checks {
+  display: flex;
+  gap: 6px;
+}
+
+.check-pill {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.62rem;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.check-pill.pass {
+  color: var(--green, #57d9a3);
+  border: 1px solid rgba(87, 217, 163, 0.4);
+}
+
+.check-pill.fail {
+  color: var(--red);
+  border: 1px solid rgba(255, 99, 125, 0.4);
+}
+
+.check-pill.pending {
+  color: var(--amber, #f0b429);
+  border: 1px solid rgba(240, 180, 41, 0.4);
+}
+
+.review-list,
+.comment-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-list li,
+.comment-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.68rem;
+  color: #c8d0dc;
+}
+
+.review-state {
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.review-state.approved {
+  color: var(--green, #57d9a3);
+  border: 1px solid rgba(87, 217, 163, 0.4);
+}
+
+.review-state.changes_requested {
+  color: var(--red);
+  border: 1px solid rgba(255, 99, 125, 0.4);
+}
+
+.review-state.commented,
+.review-state.dismissed {
+  color: var(--text-soft);
+  border: 1px solid var(--line-strong);
+}
+
+.review-author {
   color: #dfe6ef;
   font-weight: 500;
 }
 
-.batch-row em {
+.review-body {
+  flex: 1 1 100%;
   color: var(--text-soft);
-  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.progress-track {
-  height: 14px;
-  border: 1px solid #18264b;
-  background: #091126;
+.comment-block {
+  font-size: 0.68rem;
 }
 
-.progress-track span {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, var(--brand), var(--cyan));
+.comment-block summary {
+  cursor: pointer;
+  color: var(--text-soft);
+}
+
+.comment-list {
+  margin-top: 6px;
 }
 
 .queue-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: auto;
+  flex-shrink: 0;
   padding: 8px 10px;
   border-top: 1px solid var(--line);
   color: var(--text-soft);
