@@ -64,6 +64,17 @@ React renderer
   └─ global command/action bar
 ```
 
+## Harness Detection
+
+GodMode opens on a selected project root (resolved and validated in the Electron main process) and classifies its harness into four states surfaced in the project bar:
+
+- `valid` — required files all present.
+- `partial` — some required files present.
+- `missing` — no required files present.
+- `unreadable` — the path is not a readable directory (or none selected).
+
+Required: `AGENTS.md` plus `README.md` or `docs/spec.md`. Optional (reported but non-gating): `.agentic/godmode.yaml`, `docs/review/`, `docs/friction/`. Detection is path-relative to the selected root, not hardcoded to GodMode's own layout. PTY sessions launch with the selected root as their working directory.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:
@@ -94,10 +105,10 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 
 - [x] Product spec drafted.
 - [x] Initial harness and tech stack selected.
-- [ ] Electron/React/xterm scaffold.
-- [ ] Static tmux-style dashboard shell.
-- [ ] One real PTY terminal pane.
-- [ ] Project harness detection.
+- [x] Electron/React/xterm scaffold.
+- [x] Static tmux-style dashboard shell.
+- [x] One real PTY terminal pane.
+- [x] Project harness detection.
 - [ ] GitHub read-only issue/PR pane.
 - [ ] Agent adapter registry.
 - [ ] Claude builder run.

@@ -1,5 +1,6 @@
 import { AgentPane } from './components/AgentPane.js';
 import { GithubPane } from './components/GithubPane.js';
+import { ProjectBar } from './components/ProjectBar.js';
 
 const panes = [
   {
@@ -101,6 +102,8 @@ export function App() {
             <span>Gate <strong>manual</strong></span>
           </div>
         </header>
+
+        <ProjectBar />
 
         <section className="dashboard-grid" aria-label="GodMode agent workspace">
           <section className="panel chat-panel">

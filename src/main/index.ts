@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, writeToPtySession } from './pty.js';
+import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,7 @@ const ptyResizeSchema = z.object({
   cols: z.number().int().min(20).max(500),
   rows: z.number().int().min(5).max(200),
 });
+const projectSelectSchema = z.object({ path: z.string().min(1).max(4096) });
 
 function parseIpcPayload<T>(schema: z.ZodType<T>, input: unknown): T | undefined {
   const parsed = schema.safeParse(input);
@@ -62,6 +64,24 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('godmode:project:get', () => getProjectState());
+
+  ipcMain.handle('godmode:project:select', (_event, input: unknown) => {
+    const payload = parseIpcPayload(projectSelectSchema, input);
+    if (!payload) return undefined;
+    return selectProject(payload.path);
+  });
+
+  ipcMain.handle('godmode:project:browse', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Open GodMode project',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: getSelectedProjectRoot(),
+    });
+    if (result.canceled || result.filePaths.length === 0) return undefined;
+    return selectProject(result.filePaths[0]);
+  });
+
   ipcMain.handle('godmode:pty:start', (event, input: unknown) => {
     const payload = parseIpcPayload(ptyStartSchema, input);
     if (!payload) return undefined;
@@ -72,7 +92,7 @@ app.whenReady().then(() => {
 
     return openPtySession({
       paneId: payload.paneId,
-      projectRoot: process.cwd(),
+      projectRoot: getSelectedProjectRoot(),
       onData: (data) => event.sender.send('godmode:pty:data', { paneId: payload.paneId, data }),
       onExit: (exit) => event.sender.send('godmode:pty:exit', { paneId: payload.paneId, exit }),
     });
