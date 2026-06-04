@@ -8,10 +8,11 @@ type AgentPaneProps = {
   role: string;
   agent: string;
   commandHint: string;
-  description: string;
+  phase: string;
+  accent: string;
 };
 
-export function AgentPane({ id, role, agent, commandHint, description }: AgentPaneProps) {
+export function AgentPane({ id, role, agent, commandHint, phase, accent }: AgentPaneProps) {
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -24,21 +25,23 @@ export function AgentPane({ id, role, agent, commandHint, description }: AgentPa
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-      fontSize: 12,
+      fontSize: 11,
+      lineHeight: 1.2,
       theme: {
-        background: '#090b12',
-        foreground: '#d8dee9',
-        cursor: '#e151a3',
+        background: '#050608',
+        foreground: '#d7dde7',
+        cursor: '#27f288',
+        selectionBackground: '#263238',
       },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(terminalHostRef.current);
     fit.fit();
-    term.writeln(`GodMode ${role} pane`);
-    term.writeln(`Default agent: ${agent}`);
-    term.writeln(`Command hint: ${commandHint}`);
-    term.writeln('Press Start shell to attach a local PTY.');
+    term.writeln(`GodMode ${role} · ${agent}`);
+    term.writeln(`$ ${commandHint} --project /Users/creator/projects/godmode`);
+    term.writeln(`phase=${phase} adapter=cli`);
+    term.writeln('');
 
     terminalRef.current = term;
     fitRef.current = fit;
@@ -73,7 +76,7 @@ export function AgentPane({ id, role, agent, commandHint, description }: AgentPa
       term.dispose();
       terminalRef.current = null;
     };
-  }, [agent, commandHint, id, role]);
+  }, [agent, commandHint, id, phase, role]);
 
   async function startShell() {
     setStatus('running');
@@ -90,23 +93,28 @@ export function AgentPane({ id, role, agent, commandHint, description }: AgentPa
   }
 
   return (
-    <section className="pane agent-pane">
-      <header className="pane-header">
-        <div>
-          <span className="pane-role">{role}</span>
-          <strong>{agent}</strong>
+    <section className={`agent-pane accent-${accent}`}>
+      <header className="agent-header">
+        <div className="agent-title">
+          <span className="status-dot" />
+          <strong>{role}</strong>
+          <span>{agent}</span>
         </div>
-        <div className="pane-actions">
-          <button onClick={startShell} disabled={status === 'running'}>
-            {status === 'running' ? 'Running' : 'Start shell'}
+        <div className="agent-actions">
+          <span>{phase}</span>
+          <button onClick={startShell} disabled={status === 'running'} aria-label={`Start ${role} shell`}>
+            {status === 'running' ? 'Run' : '▶'}
           </button>
-          <button onClick={stopShell} disabled={status === 'idle'}>
-            Stop
+          <button onClick={stopShell} disabled={status === 'idle'} aria-label={`Stop ${role} shell`}>
+            ■
           </button>
         </div>
       </header>
-      <p className="pane-description">{description}</p>
       <div ref={terminalHostRef} className="terminal-host" />
+      <div className="agent-message-row">
+        <input aria-label={`Message ${role}`} placeholder={`Message ${role.toLowerCase()}...`} />
+        <button aria-label={`Send message to ${role}`}>Send</button>
+      </div>
     </section>
   );
 }
