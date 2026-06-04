@@ -82,6 +82,8 @@ Agent self-reports are not proof. Verify with tools:
 - Do not push directly to `main`.
 - Use one branch per task.
 - Keep PRs scoped to one issue/task.
+- Every PR must be tied to a GitHub issue. PR descriptions should use `Closes #N`, `Fixes #N`, or explicitly link the governing issue when auto-closing is not desired.
+- Do not open free-floating PRs for implementation work; if no suitable issue exists, create or ask for a focused issue first.
 - Do not bundle unrelated refactors.
 - Update docs in the same PR when behavior, architecture, setup, or harness rules change.
 - PR descriptions should include summary, verification, and linked issue.
