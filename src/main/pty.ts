@@ -77,11 +77,14 @@ export function stopPtySession(paneId: string): void {
   sessions.delete(paneId);
 }
 
-export function killAllPtySessions(): void {
+export function killAllPtySessions(): string[] {
+  const killed: string[] = [];
   for (const [paneId, session] of sessions.entries()) {
     session.kill();
     sessions.delete(paneId);
+    killed.push(paneId);
   }
+  return killed;
 }
 
 export function resizePtySession(paneId: string, cols: number, rows: number): void {
