@@ -85,6 +85,7 @@ Agent self-reports are not proof. Verify with tools:
 - Do not bundle unrelated refactors.
 - Update docs in the same PR when behavior, architecture, setup, or harness rules change.
 - PR descriptions should include summary, verification, and linked issue.
+- After pushing a commit to a PR branch, leave a PR comment that names the commit, summarizes what changed, states verification performed, and calls out any remaining caveats. Then verify the commit appears in the PR commit list before reporting completion.
 
 Suggested branch prefixes:
 
