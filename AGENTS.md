@@ -72,6 +72,8 @@ Prefer simple, boring implementation over clever abstractions.
 
 Builder and reviewer agents should use CodeGraph as a read-first repo intelligence layer when it can answer a concrete implementation or review question.
 
+The CodeGraph MCP server is wired for this repo via project-scoped `.mcp.json` (`codegraph serve --mcp`), so its tools are available to agents that honor `.mcp.json` once approved. Because the index lives in the gitignored `.codegraph/` (see Index hygiene) it is **per-clone and ephemeral** — on a fresh checkout (e.g. a Claude Code on the web session) build it once before querying with `codegraph init -i .` (or `sync` to refresh). The CLI is the equivalent fallback when the MCP server is unavailable.
+
 CodeGraph is for:
 
 - orienting around feature, IPC, component, config, and process flows;
