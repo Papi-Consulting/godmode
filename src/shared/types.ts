@@ -2,6 +2,13 @@ export type AgentRole = 'head' | 'builder' | 'reviewer_a' | 'reviewer_b';
 
 export type AgentMode = 'interactive' | 'oneshot' | 'oneshot_or_interactive';
 
+/**
+ * How an agent is driven. Only `cli` is wired for v1 (safe shell PTY); the rest
+ * are reserved so config and the registry can describe them without core code
+ * branching on a specific vendor or transport.
+ */
+export type AgentAdapter = 'cli' | 'mcp' | 'acp' | 'custom';
+
 export type AgentCapabilities = {
   interactive: boolean;
   supportsPty: boolean;
@@ -13,7 +20,7 @@ export type AgentCapabilities = {
 
 export type AgentDefinition = {
   id: string;
-  adapter: 'cli' | 'mcp' | 'acp' | 'custom';
+  adapter: AgentAdapter;
   command: string;
   mode: AgentMode;
   capabilities?: Partial<AgentCapabilities>;
@@ -25,6 +32,99 @@ export type RoleBinding = {
   displayName: string;
   paneId: string;
   roleDoc?: string;
+};
+
+/**
+ * The command templates GodMode can render for a run. Kept role-scoped and
+ * generic — `head` orchestrates and gets no launch template in v1; only the
+ * builder and reviewer lifecycle steps map to renderable commands.
+ */
+export type CommandTemplateKind = 'builder_start' | 'reviewer_start' | 'builder_fix';
+
+/**
+ * Variables a command/prompt template can interpolate, sourced from the selected
+ * issue/PR and role config. All optional: a render with a missing variable is
+ * still produced (placeholder left intact) and the gap is reported via
+ * {@link RenderedCommand.missingVariables} so previews stay auditable.
+ */
+export type TemplateContext = {
+  projectName?: string;
+  issueNumber?: number;
+  issueTitle?: string;
+  prNumber?: number;
+  prUrl?: string;
+  branch?: string;
+  /** Reviewer slug (e.g. "reviewer-a") for reviewer templates. */
+  reviewerId?: string;
+  /** Project-relative role doc the agent must read first. */
+  roleDoc?: string;
+  /** Accepted blockers handed to the builder for a fix cycle. */
+  blockers?: string;
+};
+
+/**
+ * A single, fully-resolved command rendering. Never executed by producing it —
+ * this is the auditable preview the operator inspects before any send/launch.
+ */
+export type RenderedCommand = {
+  kind: CommandTemplateKind;
+  role: AgentRole;
+  agentId: string;
+  displayName: string;
+  adapter: AgentAdapter;
+  mode: AgentMode;
+  /** Base command/binary for the bound agent (e.g. "claude", "codex"). */
+  command: string;
+  /** Auditable command line GodMode would launch (prompt delivered per mode). */
+  commandLine: string;
+  /** How the prompt reaches the agent, derived from {@link mode}. */
+  delivery: 'interactive' | 'oneshot';
+  /** Rendered prompt/instructions for the agent. */
+  prompt: string;
+  /** Template variable names left unbound in this render, for visible auditing. */
+  missingVariables: string[];
+};
+
+/** A role resolved through config/adapter objects — never a hardcoded vendor branch. */
+export type RoleResolution = {
+  role: AgentRole;
+  agentId: string;
+  displayName: string;
+  adapter: AgentAdapter;
+  mode: AgentMode;
+  capabilities: AgentCapabilities;
+  /** Reviewer slug for reviewer roles. */
+  reviewerId?: string;
+  roleDoc?: string;
+};
+
+/**
+ * Outcome of resolving the agent registry for the selected project. Mirrors
+ * {@link ConfigStatus} so unknown adapter/role configs surface a visible error
+ * while the UI keeps working on safe defaults.
+ * - `ready`: resolved from a valid config file.
+ * - `default`: no config file; resolved from built-in safe defaults.
+ * - `invalid`: config present but invalid; defaults used and `error` set.
+ * - `unreadable`: the selected root could not be read.
+ */
+export type AgentRegistryStatus = 'ready' | 'default' | 'invalid' | 'unreadable';
+
+/**
+ * Renderer-facing view of the resolved adapter registry and its auditable
+ * command previews. Role/agent keys stay generic; vendor names appear only as
+ * display labels and command hints.
+ */
+export type AgentRegistryState = {
+  status: AgentRegistryStatus;
+  source: 'config' | 'default';
+  /** Set when status is `invalid` or `unreadable`. */
+  error?: string;
+  roles: RoleResolution[];
+  /**
+   * Preview command renderings (builder start, each reviewer start, builder
+   * fix). Marked mock in the UI until a real run is launched.
+   */
+  preview: RenderedCommand[];
 };
 
 export type HarnessFileKind = 'required' | 'optional';

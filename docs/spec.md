@@ -97,6 +97,12 @@ The Electron main process loads `.agentic/godmode.yaml` from the selected projec
 
 Role and pane keys stay generic (`head`/`builder`/`reviewer_a`/`reviewer_b`). Hermes/Claude/Codex appear only as default display names and command hints, never as core identifiers. Command hints render project-agnostically (`<selected-project>`) until real selected-project command wiring exists.
 
+## Agent Adapter Registry
+
+On top of the same loaded config, the main process resolves a role-based **adapter registry** and sends it over IPC (`godmode:registry:get`, re-loaded on `godmode:project:changed`). Each role resolves through config/adapter objects — never a hardcoded vendor branch — to an `adapter` (`cli`/`mcp`/`acp`/`custom`), a `mode`, and effective `capabilities` (an adapter baseline plus per-agent overrides). Only the `cli` adapter is launch-wired in v1 (the safe shell PTY); the others describe intent so core code can reason about lifecycle without branching on a transport.
+
+The registry also renders **command templates** for the builder/reviewer lifecycle steps (`builder_start`, `reviewer_start`, `builder_fix`) with `{{variable}}` placeholders bound from issue/PR/role context. Built-in safe defaults lead with the harness reading rules; a project may override any kind via an optional `commands:` config block. Rendering a command never launches it: the renderer shows each command role-first and marked `preview · mock until launched`, with unbound variables left as visible placeholders and listed per card. Invalid/unreadable config yields safe defaults plus a visible error. See `docs/architecture/agent-adapter-registry.md`.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:
@@ -132,7 +138,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [x] One real PTY terminal pane.
 - [x] Project harness detection.
 - [ ] GitHub read-only issue/PR pane.
-- [ ] Agent adapter registry.
+- [x] Agent adapter registry.
 - [ ] Claude builder run.
 - [ ] Codex reviewer runs.
 - [ ] Automatic review/fix loop.

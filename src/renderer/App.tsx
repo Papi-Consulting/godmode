@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { AppRepoState, AgentRole, ProjectConfigState, RolePaneConfig } from '../shared/types.js';
 import { AgentPane } from './components/AgentPane.js';
+import { CommandPreviewPane } from './components/CommandPreviewPane.js';
 import { GithubPane } from './components/GithubPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
 
@@ -45,13 +46,6 @@ const chatEvents = [
     to: '@builder',
     body: 'Display names can mention Hermes/Claude/Codex; core roles stay generic.',
   },
-];
-
-const schedulerLines = [
-  '@head inspect issue #12',
-  '@builder verify branch + PR state',
-  '@reviewer_a review correctness blockers',
-  '@reviewer_b review harness drift',
 ];
 
 export function App() {
@@ -204,27 +198,7 @@ export function App() {
           <GithubPane />
 
           <section className="operator-grid" aria-label="Operator features">
-            <section className="panel scheduler-panel">
-              <header className="panel-header">
-                <div>
-                  <span className="section-kicker">Operator Features</span>
-                  <strong>Review / Fix Trigger</strong>
-                </div>
-                <span className="header-chip success">mock auto-start</span>
-              </header>
-              <div className="script-box">
-                {schedulerLines.map((line) => (
-                  <code key={line}>{line}</code>
-                ))}
-              </div>
-              <div className="run-status">
-                <span className="status-dot" />
-                <strong>Running</strong>
-                <span>Next: 2m 10s</span>
-                <span>Stops in: 2h 2m</span>
-              </div>
-              <button>Stop trigger</button>
-            </section>
+            <CommandPreviewPane />
 
             <section className="panel side-stack">
               <div className="stack-section">

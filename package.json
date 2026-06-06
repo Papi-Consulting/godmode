@@ -10,7 +10,8 @@
     "electron:dev": "npm run build:main && concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 NODE_ENV=development electron .\"",
     "build": "npm run typecheck && npm run build:main && vite build",
     "build:main": "tsc -p tsconfig.main.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
+    "test": "npm run build:main && node --test"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

@@ -7,6 +7,7 @@ import { getGithubState } from './github.js';
 import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, writeToPtySession } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 import { getConfigState } from './config.js';
+import { getRegistryState } from './agents.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -109,6 +110,10 @@ app.whenReady().then(() => {
   ipcMain.handle('godmode:project:get', () => getProjectState());
 
   ipcMain.handle('godmode:config:get', () => getConfigState());
+
+  // Resolved adapter registry + auditable command-template previews. Issue/PR
+  // variables stay unbound until run wiring exists, so previews render as mock.
+  ipcMain.handle('godmode:registry:get', () => getRegistryState());
 
   ipcMain.handle('godmode:project:select', (_event, input: unknown) => {
     const payload = parseIpcPayload(projectSelectSchema, input);

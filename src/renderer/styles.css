@@ -464,7 +464,6 @@ p {
 
 .chat-controls p,
 .stack-section p,
-.run-status,
 .guard-row,
 .checkbox-row {
   color: var(--text-soft);
@@ -516,8 +515,7 @@ p {
 }
 
 .agent-title,
-.agent-actions,
-.run-status {
+.agent-actions {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -924,41 +922,93 @@ p {
   min-height: 0;
 }
 
-.scheduler-panel {
+.command-preview-panel {
   border-right: 1px solid var(--line);
   overflow: auto;
+  min-width: 0;
 }
 
-.script-box {
+.command-preview-list {
   display: grid;
-  gap: 4px;
-  margin: 12px;
+  gap: 10px;
   padding: 12px;
+  min-width: 0;
+}
+
+.command-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
   border: 1px solid var(--line-strong);
   background: #050712;
-  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.72rem;
-  line-height: 1.5;
+  min-width: 0;
 }
 
-.script-box code {
-  color: #dce3ec;
-  white-space: normal;
+.command-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.command-card-head strong {
+  font-size: 0.74rem;
+}
+
+.command-agent {
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  margin-right: auto;
+}
+
+.command-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.command-line {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #9ec5ff;
   overflow-wrap: anywhere;
 }
 
-.run-status {
+.command-prompt {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  background: #070a16;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #d7dde7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.command-missing {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  padding: 0 12px 12px;
+  gap: 6px;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--amber);
 }
 
-.run-status strong {
-  color: var(--green);
-}
-
-.scheduler-panel > button {
-  align-self: start;
-  margin: auto 12px 12px;
+.missing-var {
+  padding: 1px 6px;
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .side-stack {

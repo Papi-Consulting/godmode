@@ -4,6 +4,7 @@ import YAML from 'yaml';
 import { z } from 'zod';
 import type {
   AgentRole,
+  ConfigStatus,
   ProjectConfigState,
   RolePaneConfig,
 } from '../shared/types.js';
@@ -18,50 +19,6 @@ const ROLE_LABEL: Record<AgentRole, string> = {
   reviewer_a: 'REV A',
   reviewer_b: 'REV B',
 };
-
-/**
- * Safe defaults used when no config file exists or a present file fails
- * validation. Hermes/Claude/Codex appear here only as default display labels and
- * command hints, never as core identifiers (AGENTS.md BYOA rule).
- */
-const DEFAULT_PANES: RolePaneConfig[] = [
-  {
-    paneId: 'head',
-    roleKey: 'head',
-    roleLabel: ROLE_LABEL.head,
-    displayName: 'Hermes',
-    agentId: 'hermes',
-    commandHint: 'hermes',
-  },
-  {
-    paneId: 'builder',
-    roleKey: 'builder',
-    roleLabel: ROLE_LABEL.builder,
-    displayName: 'Claude Code',
-    agentId: 'claude-code',
-    commandHint: 'claude',
-  },
-  {
-    paneId: 'reviewer_a',
-    roleKey: 'reviewer_a',
-    roleLabel: ROLE_LABEL.reviewer_a,
-    displayName: 'Codex',
-    agentId: 'codex',
-    commandHint: 'codex',
-    reviewerId: 'reviewer-a',
-    roleDoc: 'docs/review/reviewer-a-correctness.md',
-  },
-  {
-    paneId: 'reviewer_b',
-    roleKey: 'reviewer_b',
-    roleLabel: ROLE_LABEL.reviewer_b,
-    displayName: 'Codex',
-    agentId: 'codex',
-    commandHint: 'codex',
-    reviewerId: 'reviewer-b',
-    roleDoc: 'docs/review/reviewer-b-architecture.md',
-  },
-];
 
 const roleEntrySchema = z.object({
   agent: z.string().min(1),
@@ -82,6 +39,19 @@ const agentDefSchema = z.object({
   mode: z.enum(['interactive', 'oneshot', 'oneshot_or_interactive']),
   capabilities: z.record(z.string(), z.boolean()).optional(),
 });
+
+/**
+ * Optional per-project overrides for the built-in command templates. Each value
+ * is a prompt string that may interpolate `{{variable}}` placeholders (see
+ * agents.ts). Omitted kinds fall back to the safe harness defaults.
+ */
+const commandsSchema = z
+  .object({
+    builder_start: z.string().min(1).optional(),
+    reviewer_start: z.string().min(1).optional(),
+    builder_fix: z.string().min(1).optional(),
+  })
+  .optional();
 
 const godmodeConfigSchema = z
   .object({
@@ -110,6 +80,7 @@ const godmodeConfigSchema = z
         }),
     }),
     workflow: z.record(z.string(), z.unknown()).optional(),
+    commands: commandsSchema,
     agents: z.record(z.string(), agentDefSchema),
   })
   .superRefine((config, ctx) => {
@@ -126,7 +97,48 @@ const godmodeConfigSchema = z
     );
   });
 
-type GodmodeConfig = z.infer<typeof godmodeConfigSchema>;
+export type GodmodeConfig = z.infer<typeof godmodeConfigSchema>;
+
+/**
+ * Safe defaults used when no config file exists or a present file fails
+ * validation. This is the single source of truth for both the renderer panes and
+ * the agent registry, so the two never drift. Hermes/Claude/Codex appear here
+ * only as default display labels and command hints, never as core identifiers
+ * (AGENTS.md BYOA rule). Reviewer capabilities are narrowed because reviewers
+ * comment on PRs rather than edit files or open them.
+ */
+export const DEFAULT_CONFIG: GodmodeConfig = {
+  roles: {
+    head: { pane: 'head', agent: 'hermes', display_name: 'Hermes' },
+    builder: { pane: 'builder', agent: 'claude-code', display_name: 'Claude Code' },
+    reviewers: [
+      {
+        pane: 'reviewer_a',
+        id: 'reviewer-a',
+        agent: 'codex',
+        display_name: 'Codex',
+        role_doc: 'docs/review/reviewer-a-correctness.md',
+      },
+      {
+        pane: 'reviewer_b',
+        id: 'reviewer-b',
+        agent: 'codex',
+        display_name: 'Codex',
+        role_doc: 'docs/review/reviewer-b-architecture.md',
+      },
+    ],
+  },
+  agents: {
+    hermes: { adapter: 'cli', command: 'hermes', mode: 'interactive' },
+    'claude-code': { adapter: 'cli', command: 'claude', mode: 'interactive' },
+    codex: {
+      adapter: 'cli',
+      command: 'codex',
+      mode: 'oneshot',
+      capabilities: { canEditFiles: false, canOpenPr: false },
+    },
+  },
+};
 
 function panesFromConfig(config: GodmodeConfig): RolePaneConfig[] {
   const toPane = (
@@ -151,6 +163,8 @@ function panesFromConfig(config: GodmodeConfig): RolePaneConfig[] {
   ];
 }
 
+const DEFAULT_PANES: RolePaneConfig[] = panesFromConfig(DEFAULT_CONFIG);
+
 function formatZodError(error: z.ZodError): string {
   const issues = error.issues.slice(0, 4).map((issue) => {
     const where = issue.path.length ? issue.path.join('.') : '(root)';
@@ -160,26 +174,33 @@ function formatZodError(error: z.ZodError): string {
   return `Invalid ${CONFIG_REL_PATH}: ${issues.join('; ')}${more}`;
 }
 
-function defaultState(projectName?: string): ProjectConfigState {
-  return { status: 'default', source: 'default', projectName, panes: DEFAULT_PANES };
-}
-
-function invalidState(error: string, projectName?: string): ProjectConfigState {
-  return { status: 'invalid', source: 'default', error, projectName, panes: DEFAULT_PANES };
-}
+/**
+ * Resolved config plus the metadata both the pane view and the agent registry
+ * need. `config` is always populated — the parsed file on `loaded`, or
+ * {@link DEFAULT_CONFIG} on every non-loaded status — so callers can resolve
+ * roles uniformly while still surfacing `error` for visible feedback.
+ */
+export type LoadedConfig = {
+  status: ConfigStatus;
+  source: 'config' | 'default';
+  projectName?: string;
+  error?: string;
+  config: GodmodeConfig;
+};
 
 /**
- * Load and sanitize the selected project's role/agent config. Never throws: a
- * missing file yields defaults, and a malformed file yields a visible error
- * state with defaults so the renderer stays functional (issue #3 acceptance).
+ * Read, parse, and validate the selected project's `.agentic/godmode.yaml`.
+ * Never throws: a missing file yields defaults, a malformed file yields a
+ * visible error with defaults, and an unreadable root is reported as such. This
+ * is the shared loader behind {@link getConfigState} and the agent registry.
  */
-export function getConfigState(): ProjectConfigState {
+export function loadConfig(): LoadedConfig {
   const root = getSelectedProjectRoot();
 
   let projectName: string | undefined;
   try {
     if (!fs.statSync(root).isDirectory()) {
-      return { status: 'unreadable', source: 'default', error: `Not a directory: ${root}`, panes: DEFAULT_PANES };
+      return { status: 'unreadable', source: 'default', error: `Not a directory: ${root}`, config: DEFAULT_CONFIG };
     }
     projectName = path.basename(root);
   } catch {
@@ -187,17 +208,19 @@ export function getConfigState(): ProjectConfigState {
       status: 'unreadable',
       source: 'default',
       error: `Project root is not readable: ${root}`,
-      panes: DEFAULT_PANES,
+      config: DEFAULT_CONFIG,
     };
   }
 
   const file = path.join(root, CONFIG_REL_PATH);
   let raw: string;
   try {
-    if (!fs.statSync(file).isFile()) return defaultState(projectName);
+    if (!fs.statSync(file).isFile()) {
+      return { status: 'default', source: 'default', projectName, config: DEFAULT_CONFIG };
+    }
     raw = fs.readFileSync(file, 'utf8');
   } catch {
-    return defaultState(projectName);
+    return { status: 'default', source: 'default', projectName, config: DEFAULT_CONFIG };
   }
 
   let parsed: unknown;
@@ -205,18 +228,47 @@ export function getConfigState(): ProjectConfigState {
     parsed = YAML.parse(raw);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return invalidState(`Failed to parse ${CONFIG_REL_PATH}: ${reason}`, projectName);
+    return {
+      status: 'invalid',
+      source: 'default',
+      projectName,
+      error: `Failed to parse ${CONFIG_REL_PATH}: ${reason}`,
+      config: DEFAULT_CONFIG,
+    };
   }
 
   const result = godmodeConfigSchema.safeParse(parsed);
   if (!result.success) {
-    return invalidState(formatZodError(result.error), projectName);
+    return {
+      status: 'invalid',
+      source: 'default',
+      projectName,
+      error: formatZodError(result.error),
+      config: DEFAULT_CONFIG,
+    };
   }
 
   return {
     status: 'loaded',
     source: 'config',
     projectName: result.data.project?.name ?? projectName,
-    panes: panesFromConfig(result.data),
+    config: result.data,
+  };
+}
+
+/**
+ * Load and sanitize the selected project's role/agent config into the
+ * renderer-facing pane view. Never throws: a missing file yields defaults, and a
+ * malformed file yields a visible error state with defaults so the renderer stays
+ * functional (issue #3 acceptance).
+ */
+export function getConfigState(): ProjectConfigState {
+  const loaded = loadConfig();
+  return {
+    status: loaded.status,
+    source: loaded.source,
+    error: loaded.error,
+    projectName: loaded.projectName,
+    panes: loaded.status === 'loaded' ? panesFromConfig(loaded.config) : DEFAULT_PANES,
   };
 }
