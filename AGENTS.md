@@ -119,7 +119,7 @@ Reviewers should use CodeGraph for triage around changed symbols/files, then ver
 
 Review summaries should include whether CodeGraph found extra graph-linked blast radius or found no additional graph-linked risk.
 
-Known limitation: CodeGraph does not fully model Electron IPC string channels yet. Reviewers must manually pair `ipcRenderer.invoke/send(...)` and `ipcMain.handle/on(...)` channels when IPC behavior changes.
+Known limitation: CodeGraph does not fully model Electron IPC string channels yet. Reviewers must manually pair `ipcRenderer.invoke/send(...)` and `ipcMain.handle/on(...)` channels when IPC behavior changes. IPC code should use shared channel constants and named handlers so CodeGraph can still find the relevant boundary symbols; see `docs/conventions/codegraph-ipc.md`.
 
 ## Workflow Contract
 

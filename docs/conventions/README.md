@@ -10,6 +10,11 @@ Use this folder for:
 - issue-to-PR workflow details,
 - reviewer/blocker classification rules that apply across the repo.
 
+Current conventions:
+
+- `codegraph-ipc.md` — how to structure and review Electron IPC paths when
+  CodeGraph cannot infer string-channel flow automatically.
+
 Conventions:
 
 - Keep `AGENTS.md` focused on the high-level contract and link deeper standing rules from here.

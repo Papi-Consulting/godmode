@@ -8,6 +8,7 @@ import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, w
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 import { getConfigState } from './config.js';
 import { getRegistryState } from './agents.js';
+import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,13 +60,13 @@ function selectProjectAndResetSessions(input: string) {
   if (nextRoot !== previousRoot) {
     for (const paneId of killAllPtySessions()) {
       if (mainWindow && !mainWindow.webContents.isDestroyed()) {
-        mainWindow.webContents.send('godmode:pty:exit', { paneId, exit: { exitCode: 0 } });
+        mainWindow.webContents.send(GODMODE_IPC.ptyExit, { paneId, exit: { exitCode: 0 } });
       }
     }
     // Role/agent config is project-local, so the renderer must reload it (panes,
     // labels, command hints) whenever the active root changes.
     if (mainWindow && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('godmode:project:changed', state);
+      mainWindow.webContents.send(GODMODE_IPC.projectChanged, state);
     }
   }
 
@@ -102,70 +103,92 @@ function createWindow(): void {
   }
 }
 
+function handleGetApp() {
+  return getAppRepoState();
+}
+
+function handleGetProject() {
+  return getProjectState();
+}
+
+function handleGetConfig() {
+  return getConfigState();
+}
+
+function handleGetRegistry() {
+  return getRegistryState();
+}
+
+function handleSelectProject(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(projectSelectSchema, input);
+  if (!payload) return undefined;
+  return selectProjectAndResetSessions(payload.path);
+}
+
+async function handleBrowseProject() {
+  const result = await dialog.showOpenDialog({
+    title: 'Open GodMode project',
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: getSelectedProjectRoot(),
+  });
+  if (result.canceled || result.filePaths.length === 0) return undefined;
+  return selectProjectAndResetSessions(result.filePaths[0]);
+}
+
+function handleGetGithub() {
+  return getGithubState(getSelectedProjectRoot(), new Date().toISOString());
+}
+
+function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(ptyStartSchema, input);
+  if (!payload) return undefined;
+
+  const stopOwnedSession = () => stopPtySession(payload.paneId);
+  event.sender.once('destroyed', stopOwnedSession);
+  event.sender.once('did-start-navigation', stopOwnedSession);
+
+  return openPtySession({
+    paneId: payload.paneId,
+    projectRoot: getSelectedProjectRoot(),
+    onData: (data) => event.sender.send(GODMODE_IPC.ptyData, { paneId: payload.paneId, data }),
+    onExit: (exit) => event.sender.send(GODMODE_IPC.ptyExit, { paneId: payload.paneId, exit }),
+  });
+}
+
+function handleWritePty(_event: Electron.IpcMainEvent, input: unknown) {
+  const payload = parseIpcPayload(ptyWriteSchema, input);
+  if (!payload) return;
+  writeToPtySession(payload.paneId, payload.data);
+}
+
+function handleResizePty(_event: Electron.IpcMainEvent, input: unknown) {
+  const payload = parseIpcPayload(ptyResizeSchema, input);
+  if (!payload) return;
+  resizePtySession(payload.paneId, payload.cols, payload.rows);
+}
+
+function handleStopPty(_event: Electron.IpcMainEvent, input: unknown) {
+  const payload = parseIpcPayload(ptyStartSchema, input);
+  if (!payload) return;
+  stopPtySession(payload.paneId);
+}
+
+function registerIpcHandlers(): void {
+  ipcMain.handle(GODMODE_IPC.appGet, handleGetApp);
+  ipcMain.handle(GODMODE_IPC.projectGet, handleGetProject);
+  ipcMain.handle(GODMODE_IPC.configGet, handleGetConfig);
+  ipcMain.handle(GODMODE_IPC.registryGet, handleGetRegistry);
+  ipcMain.handle(GODMODE_IPC.projectSelect, handleSelectProject);
+  ipcMain.handle(GODMODE_IPC.projectBrowse, handleBrowseProject);
+  ipcMain.handle(GODMODE_IPC.githubGet, handleGetGithub);
+  ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
+  ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
+  ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);
+  ipcMain.on(GODMODE_IPC.ptyStop, handleStopPty);
+}
+
 app.whenReady().then(() => {
-  // Identity of the GodMode app repo itself, kept separate from the operated
-  // project so the UI can show both contexts and flag self-dogfooding.
-  ipcMain.handle('godmode:app:get', () => getAppRepoState());
-
-  ipcMain.handle('godmode:project:get', () => getProjectState());
-
-  ipcMain.handle('godmode:config:get', () => getConfigState());
-
-  // Resolved adapter registry + auditable command-template previews. Issue/PR
-  // variables stay unbound until run wiring exists, so previews render as mock.
-  ipcMain.handle('godmode:registry:get', () => getRegistryState());
-
-  ipcMain.handle('godmode:project:select', (_event, input: unknown) => {
-    const payload = parseIpcPayload(projectSelectSchema, input);
-    if (!payload) return undefined;
-    return selectProjectAndResetSessions(payload.path);
-  });
-
-  ipcMain.handle('godmode:project:browse', async () => {
-    const result = await dialog.showOpenDialog({
-      title: 'Open GodMode project',
-      properties: ['openDirectory', 'createDirectory'],
-      defaultPath: getSelectedProjectRoot(),
-    });
-    if (result.canceled || result.filePaths.length === 0) return undefined;
-    return selectProjectAndResetSessions(result.filePaths[0]);
-  });
-
-  ipcMain.handle('godmode:github:get', () => getGithubState(getSelectedProjectRoot(), new Date().toISOString()));
-
-  ipcMain.handle('godmode:pty:start', (event, input: unknown) => {
-    const payload = parseIpcPayload(ptyStartSchema, input);
-    if (!payload) return undefined;
-
-    const stopOwnedSession = () => stopPtySession(payload.paneId);
-    event.sender.once('destroyed', stopOwnedSession);
-    event.sender.once('did-start-navigation', stopOwnedSession);
-
-    return openPtySession({
-      paneId: payload.paneId,
-      projectRoot: getSelectedProjectRoot(),
-      onData: (data) => event.sender.send('godmode:pty:data', { paneId: payload.paneId, data }),
-      onExit: (exit) => event.sender.send('godmode:pty:exit', { paneId: payload.paneId, exit }),
-    });
-  });
-
-  ipcMain.on('godmode:pty:write', (_event, input: unknown) => {
-    const payload = parseIpcPayload(ptyWriteSchema, input);
-    if (!payload) return;
-    writeToPtySession(payload.paneId, payload.data);
-  });
-
-  ipcMain.on('godmode:pty:resize', (_event, input: unknown) => {
-    const payload = parseIpcPayload(ptyResizeSchema, input);
-    if (!payload) return;
-    resizePtySession(payload.paneId, payload.cols, payload.rows);
-  });
-
-  ipcMain.on('godmode:pty:stop', (_event, input: unknown) => {
-    const payload = parseIpcPayload(ptyStartSchema, input);
-    if (!payload) return;
-    stopPtySession(payload.paneId);
-  });
+  registerIpcHandlers();
 
   createWindow();
 
