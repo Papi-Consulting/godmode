@@ -23,18 +23,52 @@ The composition core (`composeBuilderHandoff`) is pure — config + run snapshot
 filesystem/PTY-touching parts (issue fetch, doc pointers, PTY write) live in the
 main process around it.
 
-## Composition
+## Composition — pointer-first, operated-project-scoped
+
+GodMode is an **agent harness, not a prompt-injection layer**. The handoff
+GodMode *sends* is therefore **pointer-first**: it directs a fresh builder to
+read the canonical sources itself and gives a compact task capsule, rather than
+pasting the full issue body/comments into the PTY. This is more token-efficient,
+keeps GitHub/docs as the live source of truth, reduces stale context and
+prompt-injection surface, and matches the `AGENTS.md` rule that fresh agents read
+repo-local source of truth before implementing.
 
 A handoff is the rendered `builder_start` template (from the registry, including
 any project `commands:` override) bound to the run's `projectName` /
 `issueNumber` / `issueTitle`, followed by a grounded block that:
 
+- names the **operated project** and states the working dir is that project's
+  root — explicitly *not* the GodMode app repo (see
+  [`app-vs-operated-project.md`](./app-vs-operated-project.md)). Every source the
+  builder reads is the operated project's own repo-local file/issue;
 - tells the builder to start a **fresh** session and read `AGENTS.md`,
-  `docs/spec.md`, the task source/detail, and relevant `docs/architecture/` and
-  `docs/conventions/` pointers before implementing;
-- includes the bound source (issue # / URL / labels, or manual task id) and the
-  task detail (issue body + comments, or manual task text), bounded so a large
-  body never floods the PTY.
+  `docs/spec.md`, the relevant `docs/architecture/` and `docs/conventions/`
+  pointers, and — for a GitHub issue — `gh issue view <N> --comments`, before
+  implementing;
+- gives a compact **task capsule**: operated project name, issue
+  number/title/URL/labels (the title is the goal summary; no body text is
+  derived into the capsule), and the closing instruction to implement only that
+  issue, then verify/commit/push/open a PR linked to it.
+
+A **manual task** has no GitHub issue to point at, so its (bounded) text is kept
+in the capsule — it is the only source of truth for that task — and it stays
+blocked from direct send regardless (no issue number), so this only grounds the
+operator preview and the `needs_spec` route.
+
+### Sent prompt vs preview/audit
+
+The two are deliberately split:
+
+- **Sent prompt** (`BuilderHandoff.prompt`, written to the PTY): pointers +
+  capsule only — never the full issue body/comments.
+- **Preview/audit** (the UI): GodMode still fetches full issue detail
+  (`getIssueDetail` → `RunSourceDetail` on the run) and the cockpit shows it in a
+  collapsible "full issue context · fetched for audit, not sent" section, so the
+  operator can read everything without that text being injected into the builder.
+
+Full-context injection into the sent prompt is left as a deliberate **future**
+option (one-shot mode, agents without GitHub/repo access, or operator-selected
+"include full context"); it is not the default.
 
 ## Sendability and the manual gate
 

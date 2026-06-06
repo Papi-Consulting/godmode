@@ -118,9 +118,19 @@ Selecting a GitHub issue (or entering a manual task) binds it to a reviewed
 sent. The main process fetches full issue detail (body, comments, URL, labels) on
 selection (`godmode:github:issue:get`) and stores it on the run, then composes the
 handoff (`godmode:run:handoff:get`) by rendering the `builder_start` template
-bound to the issue/task and appending the harness reading rules (fresh session;
-read `AGENTS.md`, `docs/spec.md`, the issue body/comments, and relevant
-architecture/convention docs) plus the grounded task detail.
+bound to the issue/task plus a grounded block.
+
+The sent prompt is **pointer-first**: GodMode is an agent harness, not a
+prompt-injection layer, so it directs a fresh builder to read the **operated
+project's** own repo-local sources itself — `AGENTS.md`, `docs/spec.md`, the
+relevant `docs/architecture/`/`docs/conventions/` docs, and (for a GitHub issue)
+`gh issue view <N> --comments` — and gives a compact task capsule (operated
+project name, issue number/title/URL/labels). It does **not** paste the full
+issue body/comments into the PTY by default; the operated project (the repo
+opened in GodMode, not the GodMode app repo) is named explicitly so the builder
+is never ambiguous about where it works. The full fetched detail stays in the
+operator preview/audit only (shown collapsibly, labeled "not sent"). Full-context
+injection is a deliberate future option, not the default.
 
 The handoff is sendable only when a real source is bound and no template
 variables are unresolved. A GitHub issue resolves fully (no leftover

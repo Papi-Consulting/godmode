@@ -91,7 +91,25 @@ export function HandoffPane({ run, selectionLocked, onCreateManualTask, onSend, 
             <span className="command-tag">{handoff.delivery}</span>
           </div>
           <code className="command-line">$ {handoff.commandLine}</code>
+          <p className="handoff-sent-note">Pointer-first prompt sent to the builder (it reads the operated project's sources itself):</p>
           <pre className="command-prompt handoff-prompt">{handoff.prompt}</pre>
+
+          {run?.sourceType === 'github_issue' && (run.sourceDetail?.body || (run.sourceDetail?.comments?.length ?? 0) > 0) ? (
+            <details className="handoff-audit">
+              <summary>Full issue context · fetched for audit, not sent</summary>
+              {run.sourceDetail?.body ? <pre className="command-prompt handoff-prompt">{run.sourceDetail.body}</pre> : null}
+              {run.sourceDetail?.comments && run.sourceDetail.comments.length > 0 ? (
+                <ul className="handoff-audit-comments">
+                  {run.sourceDetail.comments.map((comment, index) => (
+                    <li key={`${comment.author}-${index}`}>
+                      <span className="review-author">@{comment.author}</span>
+                      <span className="review-body">{comment.body}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </details>
+          ) : null}
 
           {handoff.missingVariables.length > 0 ? (
             <div className="command-missing" aria-label="Unbound template variables">

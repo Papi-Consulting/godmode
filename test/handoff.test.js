@@ -24,7 +24,7 @@ function githubRun(overrides = {}) {
   };
 }
 
-test('a bound GitHub issue produces a sendable handoff with no unresolved tokens', () => {
+test('a bound GitHub issue produces a sendable, pointer-first handoff scoped to the operated project', () => {
   const run = githubRun({
     sourceDetail: {
       url: 'https://github.com/x/y/issues/8',
@@ -35,7 +35,10 @@ test('a bound GitHub issue produces a sendable handoff with no unresolved tokens
   });
   const handoff = composeBuilderHandoff(DEFAULT_CONFIG, run, {
     projectName: 'godmode',
-    docPointers: ['docs/architecture/run-state-machine.md'],
+    docPointers: {
+      architecture: ['docs/architecture/run-state-machine.md'],
+      conventions: ['docs/conventions/codegraph-ipc.md'],
+    },
   });
 
   assert.equal(handoff.isMock, false);
@@ -44,14 +47,23 @@ test('a bound GitHub issue produces a sendable handoff with no unresolved tokens
   // Acceptance: no unresolved issue tokens remain.
   assert.ok(!handoff.prompt.includes('{{issueNumber}}'));
   assert.ok(!handoff.prompt.includes('{{issueTitle}}'));
-  assert.match(handoff.prompt, /issue #8/);
-  // Grounded in the harness reading rules and the real issue body/comments.
+  assert.match(handoff.prompt, /Issue #8/);
+  // Pointer-first: direct the builder to read the operated project's sources itself.
   assert.match(handoff.prompt, /AGENTS\.md/);
   assert.match(handoff.prompt, /docs\/spec\.md/);
   assert.match(handoff.prompt, /FRESH builder session/);
-  assert.match(handoff.prompt, /Implement the handoff binding\./);
-  assert.match(handoff.prompt, /@karan: Keep the gate manual\./);
+  assert.match(handoff.prompt, /gh issue view 8 --comments/);
   assert.match(handoff.prompt, /docs\/architecture\/run-state-machine\.md/);
+  assert.match(handoff.prompt, /docs\/conventions\/codegraph-ipc\.md/);
+  // Scoped clearly to the operated project (the repo opened in GodMode, not the app repo).
+  assert.match(handoff.prompt, /operated project/i);
+  assert.match(handoff.prompt, /godmode/);
+  assert.match(handoff.prompt, /NOT the GodMode app repo/);
+  // But the sent prompt must NOT paste the full issue body/comments — that stays
+  // in the operator preview/audit (run.sourceDetail), reducing tokens and stale
+  // context. The builder reads the issue itself via gh.
+  assert.ok(!handoff.prompt.includes('Implement the handoff binding.'), 'sent prompt must not paste issue body');
+  assert.ok(!handoff.prompt.includes('Keep the gate manual.'), 'sent prompt must not paste issue comments');
   assert.equal(handoff.sourceLabel, 'issue #8 — Bind selected issue to builder handoff');
 });
 
@@ -73,9 +85,11 @@ test('a manual task is blocked from direct send (no issue number to bind)', () =
   assert.equal(handoff.canSend, false);
   assert.ok(handoff.missingVariables.includes('issueNumber'));
   assert.match(handoff.blockedReason, /needs_spec/);
-  // The manual task text is still grounded so it can be specced.
-  assert.match(handoff.prompt, /manual task task-x/);
+  // A manual task has no GitHub issue to point at, so its text is the only source
+  // of truth and stays in the (preview-only) prompt; it is scoped to the operated project.
+  assert.match(handoff.prompt, /Manual task task-x/);
   assert.match(handoff.prompt, /Make the panes more compact\./);
+  assert.match(handoff.prompt, /operated project/i);
 });
 
 test('no bound run yields a clearly-labeled mock handoff that cannot be sent', () => {

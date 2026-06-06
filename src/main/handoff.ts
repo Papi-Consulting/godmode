@@ -12,18 +12,29 @@ import { getSelectedProjectRoot } from './project.js';
  * never sends anything — it is the auditable artifact the operator reviews
  * before the explicit approve-send gate (wired in `src/main/index.ts`).
  *
+ * The sent prompt is deliberately **pointer-first**: GodMode is an agent
+ * harness, not a prompt-injection layer, so the builder is directed to read the
+ * operated project's canonical sources itself (AGENTS.md, docs/spec.md,
+ * architecture/convention docs, and `gh issue view <N> --comments`) plus a
+ * compact task capsule — rather than pasting the full issue body/comments into
+ * the PTY. The full fetched detail stays on `run.sourceDetail` for the operator
+ * preview/audit only (see `docs/architecture/builder-handoff.md`). Every source
+ * is scoped to the **operated project** — the repo opened in GodMode and worked
+ * on by agents, never the GodMode app repo (see app-vs-operated-project.md).
+ *
  * The core ({@link composeBuilderHandoff}) is pure and Electron/PTY-free so it
  * can be unit-tested directly. {@link getCurrentHandoff} is the thin wrapper that
  * reads the loaded config, the current run, and the project's doc pointers.
  */
 
-/** Bound to a builder session, so keep large issue bodies from flooding the PTY. */
+/** Manual task text is the only source for a manual task, so bound it for the PTY. */
 const MAX_BODY_CHARS = 6000;
-const MAX_COMMENT_CHARS = 1200;
-const MAX_COMMENTS = 10;
 
 /** Top-level pointer dirs the builder should consult when relevant to the task. */
-const POINTER_DIRS = ['docs/architecture', 'docs/conventions'];
+const POINTER_DIRS = ['docs/architecture', 'docs/conventions'] as const;
+
+/** Concrete doc pointers per pointer dir, used to name relevant docs in the prompt. */
+export type DocPointers = { architecture: string[]; conventions: string[] };
 
 function truncate(text: string, max: number): string {
   const trimmed = text.trim();
@@ -41,60 +52,73 @@ export function promptDigest(prompt: string, max = 140): string {
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
 }
 
+/** A read-list bullet pointing at a project dir, naming concrete docs when known. */
+function pointerLine(dir: string, docs: string[]): string {
+  const examples = docs.length > 0 ? ` (e.g. ${docs.join(', ')})` : '';
+  return `- relevant docs under ${dir}/${examples}`;
+}
+
 /**
- * The required-reading + task-detail block appended to every handoff. Leads with
- * the fresh-session and harness reading expectations from AGENTS.md so the
- * builder always orients before implementing, then grounds the work in the bound
- * source (issue body/comments or manual task text).
+ * The pointer-first required-reading + task-capsule block appended to every
+ * handoff. It directs a FRESH builder to read the **operated project's** own
+ * repo-local sources before implementing (AGENTS.md, docs/spec.md, the
+ * architecture/convention docs, and `gh issue view <N> --comments`), then gives a
+ * compact capsule of the bound issue/task — never the full issue body/comments.
+ * The operated project is the repo opened in GodMode, not the GodMode app repo.
  */
-function groundingBlock(run: RunSnapshot | null, docPointers: string[]): string {
+function groundingBlock(run: RunSnapshot | null, projectName: string | undefined, pointers: DocPointers): string {
+  const project = projectName ? `"${projectName}"` : '(unnamed)';
+  const issueNumber = run?.sourceType === 'github_issue' ? run.issueNumber : undefined;
+
   const lines: string[] = [];
   lines.push('== Builder handoff (GodMode) ==');
-  lines.push('Start a FRESH builder session in the operated project root. Read before implementing:');
+  lines.push(
+    `Start a FRESH builder session for the OPERATED PROJECT ${project} — the repo opened in ` +
+      'GodMode and worked on by agents, NOT the GodMode app repo. Your working directory is ' +
+      "that project's root. Read its repo-local sources yourself before implementing:",
+  );
   lines.push('- AGENTS.md — process, authority, and safety rules');
   lines.push('- docs/spec.md — current product/technical spec');
-  lines.push('- the task source and detail below (issue body/comments or task text)');
-  const pointers = docPointers.length > 0 ? ` (e.g. ${docPointers.join(', ')})` : '';
-  lines.push(`- relevant docs under ${POINTER_DIRS.join('/ and ')}/${pointers}`);
+  lines.push(pointerLine('docs/architecture', pointers.architecture));
+  lines.push(pointerLine('docs/conventions', pointers.conventions));
+  if (issueNumber !== undefined) {
+    lines.push(`- gh issue view ${issueNumber} --comments — the issue body and discussion (in this repo)`);
+  }
   lines.push('');
 
+  // Compact task capsule: pointers to the source, not its full content. The
+  // operator preview/audit keeps the full fetched body/comments separately.
+  lines.push('Task capsule:');
+  lines.push(`- Project: ${projectName ?? '(unnamed)'} (operated project)`);
+
   if (!run) {
-    lines.push('Task source: none — mock/demo preview (no issue or task bound).');
+    lines.push('- Source: none — mock/demo preview (select an issue or create a manual task)');
     lines.push('');
-    lines.push('Task detail:');
-    lines.push('(no detail bound — select an issue or create a manual task for a real handoff)');
-    lines.push('');
-    lines.push('When done: test, commit, push, and open a PR that links the task.');
+    lines.push('Implement only the selected issue in the operated project. Verify, commit, push, and open a PR linked to it.');
     return lines.join('\n');
   }
 
   const detail = run.sourceDetail ?? {};
   if (run.sourceType === 'github_issue') {
-    const title = run.issueTitle ?? '(untitled)';
-    lines.push(`Task source: issue #${run.issueNumber} — ${title}`);
-    if (detail.url) lines.push(`URL: ${detail.url}`);
-    if (detail.labels && detail.labels.length > 0) lines.push(`Labels: ${detail.labels.join(', ')}`);
+    lines.push(`- Issue #${run.issueNumber}: ${run.issueTitle ?? '(untitled)'}`);
+    if (detail.url) lines.push(`- URL: ${detail.url}`);
+    if (detail.labels && detail.labels.length > 0) lines.push(`- Labels: ${detail.labels.join(', ')}`);
     lines.push('');
-    lines.push('Issue body:');
-    lines.push(detail.body ? truncate(detail.body, MAX_BODY_CHARS) : '(issue body unavailable)');
-    const comments = (detail.comments ?? []).slice(0, MAX_COMMENTS);
-    if (comments.length > 0) {
-      lines.push('');
-      lines.push(`Comments (${comments.length}):`);
-      for (const comment of comments) {
-        lines.push(`- @${comment.author}: ${truncate(comment.body, MAX_COMMENT_CHARS)}`);
-      }
-    }
+    lines.push(
+      `Implement only issue #${run.issueNumber} in the operated project. Verify, commit, push, and open a PR linked to issue #${run.issueNumber}.`,
+    );
   } else {
-    const title = run.issueTitle ? ` — ${run.issueTitle}` : '';
-    lines.push(`Task source: manual task ${run.sourceId}${title}`);
+    // A manual task has no GitHub issue to point at, so its text is the only
+    // source of truth and is included (bounded). Manual tasks stay blocked from
+    // direct send anyway, so this only grounds the operator preview/needs_spec.
+    lines.push(`- Manual task ${run.sourceId}${run.issueTitle ? `: ${run.issueTitle}` : ''}`);
     lines.push('');
     lines.push('Task detail:');
     lines.push(detail.body ? truncate(detail.body, MAX_BODY_CHARS) : '(no task text provided)');
+    lines.push('');
+    lines.push('Implement only this task in the operated project. Verify, commit, push, and open a PR linked to it.');
   }
 
-  lines.push('');
-  lines.push('When done: test, commit, push, and open a PR that links the task.');
   return lines.join('\n');
 }
 
@@ -112,10 +136,13 @@ function groundingBlock(run: RunSnapshot | null, docPointers: string[]): string 
 export function composeBuilderHandoff(
   config: GodmodeConfig,
   run: RunSnapshot | null,
-  options: { projectName?: string; docPointers?: string[] } = {},
+  options: { projectName?: string; docPointers?: Partial<DocPointers> } = {},
 ): BuilderHandoff {
   const projectName = options.projectName;
-  const docPointers = options.docPointers ?? [];
+  const docPointers: DocPointers = {
+    architecture: options.docPointers?.architecture ?? [],
+    conventions: options.docPointers?.conventions ?? [],
+  };
 
   const builder = buildRoleResolutions(config).find((role) => role.role === 'builder');
   const agentId = builder?.agentId ?? config.roles.builder.agent;
@@ -133,7 +160,7 @@ export function composeBuilderHandoff(
   if (run?.issueTitle) vars.issueTitle = run.issueTitle;
   const { prompt: templatePrompt, missingVariables } = renderTemplate(templates.builder_start, vars);
 
-  const prompt = `${templatePrompt}\n\n${groundingBlock(run, docPointers)}`;
+  const prompt = `${templatePrompt}\n\n${groundingBlock(run, projectName, docPointers)}`;
 
   const isMock = run === null;
   const canSend = !isMock && missingVariables.length === 0;
@@ -172,31 +199,38 @@ export function composeBuilderHandoff(
   };
 }
 
-/**
- * Read the project's top-level architecture/convention doc filenames so the
- * handoff can name concrete pointers. Best-effort and bounded; returns [] when
- * the dirs are absent or unreadable.
- */
-export function collectDocPointers(projectRoot: string): string[] {
-  const pointers: string[] = [];
-  for (const dir of POINTER_DIRS) {
-    try {
-      const entries = fs.readdirSync(path.join(projectRoot, dir), { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'README.md') {
-          pointers.push(`${dir}/${entry.name}`);
-        }
+/** List the `.md` doc filenames under one project-relative dir (bounded, best-effort). */
+function listDocs(projectRoot: string, dir: string): string[] {
+  const docs: string[] = [];
+  try {
+    const entries = fs.readdirSync(path.join(projectRoot, dir), { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'README.md') {
+        docs.push(`${dir}/${entry.name}`);
       }
-    } catch {
-      // Dir absent/unreadable — pointers stay best-effort.
     }
+  } catch {
+    // Dir absent/unreadable — pointers stay best-effort.
   }
-  return pointers.sort().slice(0, 8);
+  return docs.sort().slice(0, 6);
 }
 
 /**
- * Build the handoff for the current run, reading the loaded config and project
- * doc pointers. Never throws: a missing/invalid config falls back to safe
+ * Read the operated project's top-level architecture/convention doc filenames,
+ * grouped per dir, so the handoff can name concrete pointers the builder should
+ * read. Best-effort and bounded; returns empty groups when the dirs are
+ * absent/unreadable.
+ */
+export function collectDocPointers(projectRoot: string): DocPointers {
+  return {
+    architecture: listDocs(projectRoot, POINTER_DIRS[0]),
+    conventions: listDocs(projectRoot, POINTER_DIRS[1]),
+  };
+}
+
+/**
+ * Build the handoff for the current run, reading the loaded config and operated
+ * project doc pointers. Never throws: a missing/invalid config falls back to safe
  * defaults, exactly like the registry.
  */
 export function getCurrentHandoff(run: RunSnapshot | null): BuilderHandoff {
