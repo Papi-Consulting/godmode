@@ -242,6 +242,36 @@ export type GithubComment = {
   createdAt: string;
 };
 
+/**
+ * Full detail for a single GitHub issue, fetched on demand when an issue is
+ * selected for a run. The issue *list* model ({@link GithubIssue}) only carries
+ * summary metadata; this adds the body, comments, and URL needed to ground a
+ * builder handoff prompt in the actual task. Read-only, like the rest of the
+ * GitHub snapshot.
+ */
+export type GithubIssueDetail = {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  state: string;
+  updatedAt: string;
+  labels: GithubLabel[];
+  comments: GithubComment[];
+};
+
+/**
+ * Outcome of fetching a single issue's detail. Mirrors {@link GithubState}'s
+ * never-throw contract: every failure mode is folded into `status`/`message` so
+ * the renderer can show actionable guidance, and `issue` is null unless the
+ * fetch succeeded.
+ */
+export type GithubIssueDetailResult = {
+  status: GithubStatus;
+  message?: string;
+  issue: GithubIssueDetail | null;
+};
+
 export type GithubCheck = {
   name: string;
   /** Normalized: SUCCESS, FAILURE, PENDING, SKIPPED, NEUTRAL. */
@@ -413,6 +443,45 @@ export type RunAction =
   | 'exceed_max_cycles'
   | 'close';
 
+/**
+ * Selected-source detail bound to a run, used to ground the builder handoff
+ * prompt in the real task. For a `github_issue` run these come from
+ * {@link GithubIssueDetail}; for a `manual_task` run, `body` carries the operator's
+ * task text. All optional: a run can exist with only summary metadata (e.g. when
+ * issue-detail fetch failed), and the handoff degrades visibly rather than lying.
+ */
+export type RunSourceDetail = {
+  /** Issue/PR URL, when the source is a GitHub issue. */
+  url?: string;
+  /** Issue body or manual task description. */
+  body?: string;
+  /** Label names on the source issue. */
+  labels?: string[];
+  /** Issue comments, oldest first. */
+  comments?: { author: string; body: string }[];
+};
+
+/**
+ * One audited prompt send (a builder handoff or a fix prompt) recorded on the
+ * run so the operator can see what text was dispatched to which role and when.
+ * The full prompt is not retained in v1 — `digest` is a single-line preview and
+ * `promptChars` the full length — which is enough for audit without bloating the
+ * in-memory snapshot.
+ */
+export type RunPromptLogEntry = {
+  /** ISO timestamp the prompt was sent. */
+  at: string;
+  /** Role the prompt was sent to (e.g. `builder`). */
+  role: AgentRole;
+  /** Source the prompt was grounded in, copied for a self-contained audit line. */
+  sourceType: RunSourceType;
+  sourceId: string;
+  /** Single-line preview of the prompt sent, for audit. */
+  digest: string;
+  /** Character length of the full prompt sent. */
+  promptChars: number;
+};
+
 /** One logged state change, appended on every successful transition. */
 export type RunTransitionLogEntry = {
   /** ISO timestamp the transition was applied. */
@@ -439,6 +508,11 @@ export type RunSnapshot = {
   /** Convenience copy of the GitHub issue number when source is an issue. */
   issueNumber?: number;
   issueTitle?: string;
+  /**
+   * Selected-source detail (issue body/comments/URL/labels, or manual task
+   * text) used to ground the builder handoff prompt. Populated at selection time.
+   */
+  sourceDetail?: RunSourceDetail;
   status: RunStatus;
   /** Working branch, once known. */
   branch?: string;
@@ -457,6 +531,8 @@ export type RunSnapshot = {
   availableActions: RunAction[];
   /** Append-only transition history (in memory for this issue). */
   log: RunTransitionLogEntry[];
+  /** Append-only audit of prompts sent to agents (builder handoffs, fixes). */
+  prompts: RunPromptLogEntry[];
   createdAt: string;
   updatedAt: string;
 };
@@ -472,3 +548,59 @@ export type RunRejectionCode = 'no_run' | 'invalid_transition' | 'invalid_payloa
 export type RunActionResult =
   | { ok: true; run: RunSnapshot }
   | { ok: false; code: RunRejectionCode; error: string; run: RunSnapshot | null };
+
+/**
+ * The reviewed builder handoff for the current run: the exact prompt GodMode
+ * would write into the configured builder session, bound to the selected
+ * issue/task and grounded in the harness reading rules. Producing it never sends
+ * anything — it is the auditable artifact the operator reviews before the
+ * explicit approve-send gate. When no real source is bound, `isMock` is true and
+ * the prompt is a clearly-labeled demo with issue tokens left unresolved.
+ */
+export type BuilderHandoff = {
+  /** True when no selected run/source backs this handoff (mock/demo preview). */
+  isMock: boolean;
+  /** Source type of the bound run, when one exists. */
+  sourceType?: RunSourceType;
+  /** Stable source id (issue number as string, manual task id). */
+  sourceId?: string;
+  /** Human label for the bound source, e.g. "issue #8 — Title". */
+  sourceLabel?: string;
+  /** Issue URL, when grounded in a GitHub issue. */
+  issueUrl?: string;
+  /** Resolved builder display name (vendor label only; role stays generic). */
+  displayName: string;
+  /** Agent id bound to the builder role. */
+  agentId: string;
+  adapter: AgentAdapter;
+  /** How the prompt would reach the builder, derived from the agent's mode. */
+  delivery: 'interactive' | 'oneshot';
+  /** Auditable command line for the bound builder agent. */
+  commandLine: string;
+  /** The fully composed prompt that would be written to the builder session. */
+  prompt: string;
+  /** Template variables left unbound; a non-empty list blocks send. */
+  missingVariables: string[];
+  /** True only when a real source is bound and no template variables are missing. */
+  canSend: boolean;
+  /** Why send is blocked, for the UI to surface when `canSend` is false. */
+  blockedReason?: string;
+};
+
+/** Why a handoff send was rejected, so the UI can explain precisely. */
+export type HandoffRejectionCode =
+  | 'no_run'
+  | 'not_sendable'
+  | 'invalid_state'
+  | 'no_builder_session'
+  | 'invalid_transition'
+  | 'invalid_payload';
+
+/**
+ * Result of sending the approved builder handoff. On success the updated run
+ * snapshot (now `builder_running`, with a recorded prompt-sent entry) is
+ * returned; on failure nothing was sent and `run` is the unchanged snapshot.
+ */
+export type HandoffSendResult =
+  | { ok: true; run: RunSnapshot }
+  | { ok: false; code: HandoffRejectionCode; error: string; run: RunSnapshot | null };

@@ -154,6 +154,11 @@ export function writeToPtySession(paneId: string, data: string): void {
   session.write(data);
 }
 
+/** Whether a live PTY session exists for the pane (e.g. before sending a prompt). */
+export function hasPtySession(paneId: string): boolean {
+  return sessions.has(paneId);
+}
+
 export function stopPtySession(paneId: string): void {
   const session = sessions.get(paneId);
   if (!session) return;

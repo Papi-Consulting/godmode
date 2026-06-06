@@ -13,7 +13,10 @@ import {
   createRun,
   dispatchRunAction,
   getCurrentRun,
+  recordCurrentRunPrompt,
+  recordPromptSent,
   selectIssueRun,
+  selectManualTaskRun,
 } from '../dist/main/run.js';
 
 const NOW = '2026-06-06T12:00:00.000Z';
@@ -163,6 +166,60 @@ test('selectIssueRun refuses to replace a live run but allows replacing a finish
   const replaced = selectIssueRun({ issueNumber: 41, issueTitle: 'Second' });
   assert.equal(replaced.ok, true);
   assert.equal(getCurrentRun().issueNumber, 41);
+  clearRun();
+});
+
+test('selectManualTaskRun starts a manual_task run that can be routed to needs_spec', () => {
+  clearRun();
+  const result = selectManualTaskRun({ title: 'Tidy cockpit', text: 'Make panes compact' });
+  assert.equal(result.ok, true);
+  const run = getCurrentRun();
+  assert.equal(run.sourceType, 'manual_task');
+  assert.equal(run.issueNumber, undefined);
+  assert.equal(run.issueTitle, 'Tidy cockpit');
+  assert.equal(run.sourceDetail.body, 'Make panes compact');
+  assert.equal(run.status, 'issue_selected');
+
+  // A vague manual task is routed through the existing state machine, not sent.
+  const specced = dispatchRunAction('require_spec', { reason: 'needs scoping' });
+  assert.equal(specced.ok, true);
+  assert.equal(getCurrentRun().status, 'needs_spec');
+  clearRun();
+});
+
+test('selectManualTaskRun refuses to replace a live run', () => {
+  clearRun();
+  selectManualTaskRun({ title: 'First', text: 'one' });
+  const blocked = selectManualTaskRun({ title: 'Second', text: 'two' });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.code, 'invalid_transition');
+  assert.match(blocked.error, /still active/);
+  clearRun();
+});
+
+test('recordPromptSent appends an audit entry without mutating the input', () => {
+  const run = createRun({ issueNumber: 8, issueTitle: 'Handoff', now: NOW, id: 'run-prompt' });
+  const before = JSON.stringify(run);
+  const next = recordPromptSent(run, { role: 'builder', digest: 'Build #8', promptChars: 420, now: NOW });
+  assert.equal(JSON.stringify(run), before, 'recordPromptSent must not mutate its input');
+  assert.equal(next.prompts.length, 1);
+  assert.deepEqual(next.prompts[0], {
+    at: NOW,
+    role: 'builder',
+    sourceType: 'github_issue',
+    sourceId: '8',
+    digest: 'Build #8',
+    promptChars: 420,
+  });
+});
+
+test('recordCurrentRunPrompt records against the live run and is visible in history', () => {
+  clearRun();
+  assert.equal(recordCurrentRunPrompt({ role: 'builder', digest: 'x', promptChars: 1 }), null);
+  selectIssueRun({ issueNumber: 8, issueTitle: 'Handoff' });
+  const updated = recordCurrentRunPrompt({ role: 'builder', digest: 'Build #8 handoff', promptChars: 512 });
+  assert.equal(updated.prompts.length, 1);
+  assert.equal(getCurrentRun().prompts[0].digest, 'Build #8 handoff');
   clearRun();
 });
 

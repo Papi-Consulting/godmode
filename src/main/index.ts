@@ -3,12 +3,28 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { getAppRepoState } from './appRepo.js';
-import { getGithubState } from './github.js';
-import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, writeToPtySession } from './pty.js';
+import { getGithubState, getIssueDetail } from './github.js';
+import {
+  hasPtySession,
+  killAllPtySessions,
+  openPtySession,
+  resizePtySession,
+  stopPtySession,
+  writeToPtySession,
+} from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 import { getConfigState } from './config.js';
 import { getRegistryState, resolveRoleLaunch } from './agents.js';
-import { clearRun, dispatchRunAction, getCurrentRun, selectIssueRun } from './run.js';
+import {
+  clearRun,
+  dispatchRunAction,
+  getCurrentRun,
+  recordCurrentRunPrompt,
+  selectIssueRun,
+  selectManualTaskRun,
+} from './run.js';
+import { getCurrentHandoff, promptDigest } from './handoff.js';
+import type { HandoffSendResult, RunSourceDetail } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +81,11 @@ const runDispatchSchema = z.object({
   blocker: runBlockerSchema.optional(),
   branch: z.string().min(1).max(255).optional(),
   prNumber: z.number().int().positive().optional(),
+});
+const githubIssueSchema = z.object({ issueNumber: z.number().int().positive() });
+const runSelectManualSchema = z.object({
+  title: z.string().min(1).max(200),
+  text: z.string().min(1).max(20_000),
 });
 
 function parseIpcPayload<T>(schema: z.ZodType<T>, input: unknown): T | undefined {
@@ -189,18 +210,123 @@ function handleGetRun() {
   return getCurrentRun();
 }
 
-function handleSelectIssueRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+async function handleSelectIssueRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
   const payload = parseIpcPayload(runSelectIssueSchema, input);
   if (!payload) {
     return { ok: false, code: 'invalid_payload', error: 'Invalid run selection payload.', run: getCurrentRun() };
   }
+
+  // Best-effort: fetch the full issue detail so the handoff can be grounded in
+  // the real body/comments. A failure here (gh missing/auth/network) still starts
+  // the run from summary metadata — the handoff degrades visibly (e.g. "issue
+  // body unavailable") rather than blocking issue selection.
+  let sourceDetail: RunSourceDetail | undefined;
+  const detail = await getIssueDetail(getSelectedProjectRoot(), payload.issueNumber);
+  if (detail.issue) {
+    sourceDetail = {
+      url: detail.issue.url,
+      body: detail.issue.body,
+      labels: detail.issue.labels.map((label) => label.name).filter(Boolean),
+      comments: detail.issue.comments.map((comment) => ({ author: comment.author, body: comment.body })),
+    };
+  }
+
   return selectIssueRun({
     sourceType: 'github_issue',
     sourceId: String(payload.issueNumber),
     issueNumber: payload.issueNumber,
     issueTitle: payload.issueTitle,
     maxCycles: payload.maxCycles,
+    sourceDetail,
   });
+}
+
+function handleGetIssueDetail(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(githubIssueSchema, input);
+  if (!payload) return Promise.resolve({ status: 'error' as const, message: 'Invalid issue request.', issue: null });
+  return getIssueDetail(getSelectedProjectRoot(), payload.issueNumber);
+}
+
+function handleSelectManualTask(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(runSelectManualSchema, input);
+  if (!payload) {
+    return { ok: false, code: 'invalid_payload', error: 'Invalid manual task payload.', run: getCurrentRun() };
+  }
+  return selectManualTaskRun({ title: payload.title, text: payload.text });
+}
+
+function handleGetHandoff() {
+  return getCurrentHandoff(getCurrentRun());
+}
+
+/** Statuses from which an approved handoff can advance the run to `builder_running`. */
+const HANDOFF_START_STATUSES = new Set(['issue_selected', 'needs_spec', 'ready_to_build']);
+
+/**
+ * Send the approved builder handoff: validate it is sendable, confirm a live
+ * builder session, write the prompt into that session, record the prompt-sent
+ * event for audit, and advance the run to `builder_running`. Nothing is written
+ * unless every gate passes, so a rejected send leaves run and session untouched.
+ * Reaching `builder_running` records that the prompt was *sent* — never that the
+ * task succeeded.
+ */
+function handleSendHandoff(): HandoffSendResult {
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to send a handoff for.', run: null };
+  }
+
+  const handoff = getCurrentHandoff(run);
+  if (!handoff.canSend) {
+    return {
+      ok: false,
+      code: 'not_sendable',
+      error: handoff.blockedReason ?? 'This handoff is not ready to send.',
+      run,
+    };
+  }
+
+  if (!HANDOFF_START_STATUSES.has(run.status)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `The run must be issue-selected or ready-to-build to send the builder handoff (current: ${run.status}).`,
+      run,
+    };
+  }
+
+  if (!hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'no_builder_session',
+      error: 'No live builder session. Start the builder pane first, then approve & send.',
+      run,
+    };
+  }
+
+  // Deliver the prompt into the live builder PTY. Interactive CLIs read it as a
+  // submitted line; the trailing carriage return commits the input.
+  writeToPtySession('builder', `${handoff.prompt}\r`);
+
+  // Record the prompt send for audit before advancing the lifecycle.
+  recordCurrentRunPrompt({
+    role: 'builder',
+    digest: promptDigest(handoff.prompt),
+    promptChars: handoff.prompt.length,
+  });
+
+  // Advance through the deterministic state machine: ready the run if needed,
+  // then mark the builder running. Each step is logged by the guard.
+  if (run.status !== 'ready_to_build') {
+    const readied = dispatchRunAction('mark_ready');
+    if (!readied.ok) return { ok: false, code: 'invalid_transition', error: readied.error, run: readied.run };
+  }
+  const reason = `Builder handoff sent to ${handoff.displayName} (${handoff.prompt.length} chars) for ${handoff.sourceLabel}.`;
+  const started = dispatchRunAction('start_builder', { reason });
+  if (!started.ok) {
+    return { ok: false, code: 'invalid_transition', error: started.error, run: started.run };
+  }
+  return { ok: true, run: started.run };
 }
 
 function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
@@ -267,10 +393,14 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.projectSelect, handleSelectProject);
   ipcMain.handle(GODMODE_IPC.projectBrowse, handleBrowseProject);
   ipcMain.handle(GODMODE_IPC.githubGet, handleGetGithub);
+  ipcMain.handle(GODMODE_IPC.githubIssueGet, handleGetIssueDetail);
   ipcMain.handle(GODMODE_IPC.runGet, handleGetRun);
   ipcMain.handle(GODMODE_IPC.runSelectIssue, handleSelectIssueRun);
+  ipcMain.handle(GODMODE_IPC.runSelectManual, handleSelectManualTask);
   ipcMain.handle(GODMODE_IPC.runDispatch, handleDispatchRun);
   ipcMain.handle(GODMODE_IPC.runClear, handleClearRun);
+  ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
+  ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);

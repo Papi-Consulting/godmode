@@ -111,6 +111,41 @@ Starting a pane launches the configured agent for that role, not a generic shell
 
 The issue-to-PR workflow is governed by a single deterministic run state machine in the main process, not by agent self-report or by transition rules scattered across the UI. A `RunSnapshot` carries the current status, selected issue, branch/PR, cycle/`maxCycles`, any blocker/reason, the available operator actions, and an append-only transition log. Every phase change goes through one guard (`applyAction`): it consults a central transition table, rejects illegal transitions with a typed error and **no** state mutation, and on success logs the transition (`from`/`to`/`action`/`reason`) and recomputes `availableActions`. The dashboard renders operator controls from `availableActions` and selects an issue from the GitHub pane via `godmode:run:*` IPC (Zod-validated). Spec states beyond the `RunStatus` union are reconciled explicitly: `karan_merged` and `closed` are added as terminal statuses, while `pr_conflicted`, `tests_failed`, `checks_unstable`, `harness_missing`, and `repo_dirty` map onto `needs_human` with a recorded `blocker`. Persistence is in-memory for v1 but the snapshot is serializable for later `.godmode/runs/`/SQLite storage. See `docs/architecture/run-state-machine.md`.
 
+## Builder Handoff
+
+Selecting a GitHub issue (or entering a manual task) binds it to a reviewed
+**builder handoff** prompt that the operator must explicitly approve before it is
+sent. The main process fetches full issue detail (body, comments, URL, labels) on
+selection (`godmode:github:issue:get`) and stores it on the run, then composes the
+handoff (`godmode:run:handoff:get`) by rendering the `builder_start` template
+bound to the issue/task plus a grounded block.
+
+The sent prompt is **pointer-first**: GodMode is an agent harness, not a
+prompt-injection layer, so it directs a fresh builder to read the **operated
+project's** own repo-local sources itself — `AGENTS.md`, `docs/spec.md`, the
+relevant `docs/architecture/`/`docs/conventions/` docs, and (for a GitHub issue)
+`gh issue view <N> --comments` — and gives a compact task capsule (operated
+project name, issue number/title/URL/labels). It does **not** paste the full
+issue body/comments into the PTY by default; the operated project (the repo
+opened in GodMode, not the GodMode app repo) is named explicitly so the builder
+is never ambiguous about where it works. The full fetched detail stays in the
+operator preview/audit only (shown collapsibly, labeled "not sent"). Full-context
+injection is a deliberate future option, not the default.
+
+The handoff is sendable only when a real source is bound and no template
+variables are unresolved. A GitHub issue resolves fully (no leftover
+`{{issueNumber}}`/`{{issueTitle}}`); a manual task has no issue number, so send is
+blocked and the operator routes a vague task to `needs_spec` rather than sending
+it blindly. With no run bound, the preview is clearly labeled mock/demo.
+
+Sending (`godmode:run:handoff:send`) is gated behind an explicit operator
+approval and a live builder session: the approved prompt is written into the
+configured builder PTY (in the operated-project root), a prompt-sent event
+(timestamp, source, single-line digest, length) is recorded in the run's audit
+log, and the run advances to `builder_running`. Reaching `builder_running`
+records that the prompt was *sent*, never that the task succeeded. See
+`docs/architecture/builder-handoff.md`.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:
@@ -147,6 +182,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [x] Project harness detection.
 - [ ] GitHub read-only issue/PR pane.
 - [x] Agent adapter registry.
+- [x] Builder handoff: bind selected issue/manual task to a reviewed prompt and send to the builder.
 - [ ] Claude builder run.
 - [ ] Codex reviewer runs.
 - [ ] Automatic review/fix loop.

@@ -11,6 +11,7 @@ import type {
 import { AgentPane } from './components/AgentPane.js';
 import { CommandPreviewPane } from './components/CommandPreviewPane.js';
 import { GithubPane } from './components/GithubPane.js';
+import { HandoffPane } from './components/HandoffPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
 import { RunControlPane, STATUS_LABEL, type RunDispatchOptions } from './components/RunControlPane.js';
 
@@ -67,6 +68,7 @@ export function App() {
   const [appRepo, setAppRepo] = useState<AppRepoState | null>(null);
   const [run, setRun] = useState<RunSnapshot | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
   // Monotonic id for the latest run request. Like the GitHub pane, a run fetch
   // snapshots state in main at invocation time, so a late `getRun()` for the
   // previous operated project must never repopulate stale run state. Mutations
@@ -93,6 +95,19 @@ export function App() {
     setRunError(result.ok ? null : result.error);
   }, []);
 
+  // Start a run from an operator-entered manual task. Vague tasks have no issue
+  // number to bind, so the resulting handoff is not directly sendable — the
+  // operator routes them to needs_spec instead of sending blindly.
+  const createManualTask = useCallback(async (title: string, text: string) => {
+    if (!window.godmode) return;
+    const seq = (runRequestSeq.current += 1);
+    const result = await window.godmode.selectManualTask({ title, text });
+    if (seq !== runRequestSeq.current) return;
+    setRun(result.run);
+    setRunError(result.ok ? null : result.error);
+    setSendError(null);
+  }, []);
+
   // Drive a transition. The guard lives in main, so a rejected action leaves
   // state unchanged and we surface why instead of inventing a transition here.
   const dispatchRun = useCallback(async (action: RunAction, options?: RunDispatchOptions) => {
@@ -104,6 +119,18 @@ export function App() {
     setRunError(result.ok ? null : result.error);
   }, []);
 
+  // Approve and send the builder handoff. Main validates sendability, confirms a
+  // live builder session, writes the prompt into it, logs the prompt-sent event,
+  // and advances the run to builder_running — all atomically.
+  const sendHandoff = useCallback(async () => {
+    if (!window.godmode) return;
+    const seq = (runRequestSeq.current += 1);
+    const result = await window.godmode.sendHandoff();
+    if (seq !== runRequestSeq.current) return;
+    if (result.run) setRun(result.run);
+    setSendError(result.ok ? null : result.error);
+  }, []);
+
   const clearRun = useCallback(async () => {
     if (!window.godmode) return;
     const seq = (runRequestSeq.current += 1);
@@ -111,6 +138,7 @@ export function App() {
     if (seq !== runRequestSeq.current) return;
     setRun(next ?? null);
     setRunError(null);
+    setSendError(null);
   }, []);
 
   useEffect(() => {
@@ -132,6 +160,7 @@ export function App() {
       runRequestSeq.current += 1;
       setRun(null);
       setRunError(null);
+      setSendError(null);
       void refreshRun();
     });
     return () => {
@@ -295,6 +324,13 @@ export function App() {
                 </header>
                 <p>{bindingSummary ? `bindings · ${bindingSummary}` : 'no role bindings loaded'}</p>
               </div>
+              <HandoffPane
+                run={run}
+                selectionLocked={run !== null && !TERMINAL_RUN_STATUSES.has(run.status)}
+                onCreateManualTask={createManualTask}
+                onSend={sendHandoff}
+                sendError={sendError}
+              />
               <RunControlPane run={run} error={runError} onDispatch={dispatchRun} onClear={clearRun} />
             </section>
           </section>

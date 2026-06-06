@@ -1,8 +1,11 @@
 import type {
+  AgentRole,
   RunAction,
   RunActionResult,
   RunBlockerKind,
+  RunPromptLogEntry,
   RunSnapshot,
+  RunSourceDetail,
   RunSourceType,
   RunStatus,
   RunTransitionLogEntry,
@@ -239,6 +242,8 @@ export type CreateRunInput = {
   sourceId?: string;
   issueNumber?: number;
   issueTitle?: string;
+  /** Selected-source detail (issue body/comments/URL, or manual task text). */
+  sourceDetail?: RunSourceDetail;
   maxCycles?: number;
   /** Provide a stable id (and timestamp) for deterministic tests. */
   id?: string;
@@ -246,12 +251,19 @@ export type CreateRunInput = {
 };
 
 let runIdCounter = 0;
+let manualTaskCounter = 0;
 
 function generateRunId(issueNumber: number | undefined): string {
   runIdCounter += 1;
   const stamp = Date.now().toString(36);
   const source = issueNumber !== undefined ? `issue-${issueNumber}` : 'task';
   return `run-${stamp}-${source}-${runIdCounter}`;
+}
+
+/** Stable, human-readable id for a manual task (no GitHub issue number). */
+function generateManualTaskId(): string {
+  manualTaskCounter += 1;
+  return `task-${Date.now().toString(36)}-${manualTaskCounter}`;
 }
 
 /**
@@ -267,11 +279,13 @@ export function createRun(input: CreateRunInput = {}): RunSnapshot {
     sourceId: input.sourceId ?? (issueNumber !== undefined ? String(issueNumber) : 'manual'),
     issueNumber,
     issueTitle: input.issueTitle,
+    sourceDetail: input.sourceDetail,
     status: 'idle',
     cycle: 1,
     maxCycles: input.maxCycles ?? DEFAULT_MAX_CYCLES,
     availableActions: [],
     log: [],
+    prompts: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -319,6 +333,49 @@ export function selectIssueRun(input: CreateRunInput): RunActionResult {
   return result;
 }
 
+/** Inputs for starting a manual (non-GitHub) task run. */
+export type SelectManualTaskInput = {
+  /** Short task title (display + handoff source label). */
+  title: string;
+  /** Free-text task description, grounded into the handoff prompt. */
+  text: string;
+  maxCycles?: number;
+  /** Provide a stable id (and timestamp) for deterministic tests. */
+  id?: string;
+  now?: string;
+};
+
+/**
+ * Start a run for an operator-entered manual task. Mirrors {@link selectIssueRun}
+ * (same live-run guard) but binds a `manual_task` source: there is no GitHub
+ * issue number, so the resulting handoff is deliberately not directly sendable
+ * and the operator routes a vague task to `needs_spec` through the normal state
+ * machine instead of sending it blindly.
+ */
+export function selectManualTaskRun(input: SelectManualTaskInput): RunActionResult {
+  if (currentRun && !TERMINAL_STATUSES.has(currentRun.status)) {
+    const which = currentRun.issueNumber !== undefined ? `issue #${currentRun.issueNumber}` : currentRun.sourceId;
+    return {
+      ok: false,
+      code: 'invalid_transition',
+      error: `A run for ${which} is still active (${currentRun.status}). Close, cancel, or clear it before starting another task.`,
+      run: currentRun,
+    };
+  }
+  const created = createRun({
+    sourceType: 'manual_task',
+    sourceId: input.id ?? generateManualTaskId(),
+    issueTitle: input.title,
+    sourceDetail: { body: input.text },
+    maxCycles: input.maxCycles,
+    id: input.id,
+    now: input.now,
+  });
+  const result = applyAction(created, 'select_issue', { now: created.createdAt });
+  if (result.ok) currentRun = result.run;
+  return result;
+}
+
 /**
  * Dispatch an action against the current run. Returns a typed rejection when
  * there is no run or the transition is illegal; on illegal transitions the
@@ -331,6 +388,44 @@ export function dispatchRunAction(action: RunAction, options: ApplyActionOptions
   const result = applyAction(currentRun, action, options);
   if (result.ok) currentRun = result.run;
   return result;
+}
+
+/** Details of a prompt sent to an agent, recorded for audit on the run. */
+export type RecordPromptInput = {
+  role: AgentRole;
+  /** Single-line preview of the prompt sent. */
+  digest: string;
+  /** Character length of the full prompt sent. */
+  promptChars: number;
+  now?: string;
+};
+
+/**
+ * Append a prompt-sent entry to a run, returning a new snapshot (the input is
+ * never mutated, matching {@link applyAction}). The full prompt is not retained —
+ * `digest`/`promptChars` are enough for audit without bloating the snapshot.
+ */
+export function recordPromptSent(run: RunSnapshot, input: RecordPromptInput): RunSnapshot {
+  const at = input.now ?? new Date().toISOString();
+  const entry: RunPromptLogEntry = {
+    at,
+    role: input.role,
+    sourceType: run.sourceType,
+    sourceId: run.sourceId,
+    digest: input.digest,
+    promptChars: input.promptChars,
+  };
+  return { ...run, prompts: [...run.prompts, entry], updatedAt: at };
+}
+
+/**
+ * Record a prompt send against the current run (controller wrapper). Returns the
+ * updated snapshot, or null when there is no active run.
+ */
+export function recordCurrentRunPrompt(input: RecordPromptInput): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = recordPromptSent(currentRun, input);
+  return currentRun;
 }
 
 /**

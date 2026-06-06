@@ -3,7 +3,10 @@ import type { PtyExit, PtyStartResult } from '../main/pty.js';
 import type {
   AgentRegistryState,
   AppRepoState,
+  BuilderHandoff,
+  GithubIssueDetailResult,
   GithubState,
+  HandoffSendResult,
   ProjectConfigState,
   ProjectState,
   RunAction,
@@ -30,11 +33,17 @@ const api = {
     ipcRenderer.invoke(GODMODE_IPC.projectSelect, input) as Promise<ProjectState | undefined>,
   browseProject: () => ipcRenderer.invoke(GODMODE_IPC.projectBrowse) as Promise<ProjectState | undefined>,
   getGithub: () => ipcRenderer.invoke(GODMODE_IPC.githubGet) as Promise<GithubState>,
+  getIssueDetail: (input: { issueNumber: number }) =>
+    ipcRenderer.invoke(GODMODE_IPC.githubIssueGet, input) as Promise<GithubIssueDetailResult>,
   getConfig: () => ipcRenderer.invoke(GODMODE_IPC.configGet) as Promise<ProjectConfigState>,
   getRegistry: () => ipcRenderer.invoke(GODMODE_IPC.registryGet) as Promise<AgentRegistryState>,
   getRun: () => ipcRenderer.invoke(GODMODE_IPC.runGet) as Promise<RunSnapshot | null>,
   selectIssueRun: (input: { issueNumber: number; issueTitle?: string; maxCycles?: number }) =>
     ipcRenderer.invoke(GODMODE_IPC.runSelectIssue, input) as Promise<RunActionResult>,
+  selectManualTask: (input: { title: string; text: string }) =>
+    ipcRenderer.invoke(GODMODE_IPC.runSelectManual, input) as Promise<RunActionResult>,
+  getHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffGet) as Promise<BuilderHandoff>,
+  sendHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffSend) as Promise<HandoffSendResult>,
   dispatchRun: (input: {
     action: RunAction;
     reason?: string;

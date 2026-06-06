@@ -1026,6 +1026,95 @@ p {
   overflow: auto;
 }
 
+.handoff-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.handoff-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.handoff-source {
+  font-size: 0.74rem;
+  font-weight: 600;
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+
+.handoff-prompt {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.handoff-sent-note {
+  margin: 0;
+  font-size: 0.64rem;
+  color: var(--text-dim);
+}
+
+.handoff-audit > summary {
+  cursor: pointer;
+  font-size: 0.66rem;
+  color: var(--text-soft);
+}
+
+.handoff-audit-comments {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.68rem;
+}
+
+.handoff-audit-comments li {
+  display: grid;
+  gap: 2px;
+}
+
+.handoff-blocked {
+  margin: 0;
+  font-size: 0.68rem;
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+
+.handoff-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.handoff-sent {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  font-size: 0.66rem;
+  color: var(--text-soft);
+}
+
+.handoff-digest {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.manual-task-form {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.manual-task-form textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
 .stack-section {
   padding: 11px 12px;
   border-bottom: 1px solid var(--line);

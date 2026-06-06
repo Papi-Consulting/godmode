@@ -6,6 +6,8 @@ import type {
   GithubCheck,
   GithubComment,
   GithubIssue,
+  GithubIssueDetail,
+  GithubIssueDetailResult,
   GithubPullRequest,
   GithubRepo,
   GithubReview,
@@ -380,6 +382,61 @@ export async function getGithubState(projectRoot: string, fetchedAt: string): Pr
     pulls: pulls.value,
     fetchedAt,
   };
+}
+
+/**
+ * Fetch full detail for a single issue (body, comments, URL, labels) for the
+ * given project root. Like {@link getGithubState} this shells out to `gh` with a
+ * read-only subcommand and never throws: failures fold into `status`/`message`
+ * with a null `issue`. Used to ground a builder handoff prompt in the real task,
+ * since the issue *list* only carries summary metadata.
+ */
+export async function getIssueDetail(
+  projectRoot: string,
+  issueNumber: number,
+): Promise<GithubIssueDetailResult> {
+  const cwd = path.resolve(projectRoot);
+  const result = await runGh(
+    ['issue', 'view', String(issueNumber), '--json', 'number,title,body,url,state,updatedAt,labels,comments'],
+    cwd,
+  );
+  if (!result.ok) {
+    return { status: result.status, message: result.message, issue: null };
+  }
+
+  type RawComment = { author?: { login?: string }; body?: string; createdAt?: string };
+  type Raw = {
+    number?: number;
+    title?: string;
+    body?: string;
+    url?: string;
+    state?: string;
+    updatedAt?: string;
+    labels?: RawLabel[];
+    comments?: RawComment[];
+  };
+  const raw = parseJson<Raw | null>(result.stdout, null);
+  if (!raw || typeof raw.number !== 'number') {
+    return { status: 'error', message: `Could not read issue #${issueNumber} detail.`, issue: null };
+  }
+
+  const comments: GithubComment[] = (raw.comments ?? []).map((comment) => ({
+    author: comment.author?.login ?? 'unknown',
+    body: comment.body ?? '',
+    createdAt: comment.createdAt ?? '',
+  }));
+
+  const issue: GithubIssueDetail = {
+    number: raw.number,
+    title: raw.title ?? '',
+    body: raw.body ?? '',
+    url: raw.url ?? '',
+    state: raw.state ?? '',
+    updatedAt: raw.updatedAt ?? '',
+    labels: mapLabels(raw.labels),
+    comments,
+  };
+  return { status: 'ok', issue };
 }
 
 /** Join a short list with commas and a trailing "and": ["a","b","c"] → "a, b, and c". */
