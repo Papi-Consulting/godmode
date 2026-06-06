@@ -13,6 +13,7 @@ import type {
   RunActionResult,
   RunBlockerKind,
   RunSnapshot,
+  RunVerificationResult,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
@@ -44,12 +45,14 @@ const api = {
     ipcRenderer.invoke(GODMODE_IPC.runSelectManual, input) as Promise<RunActionResult>,
   getHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffGet) as Promise<BuilderHandoff>,
   sendHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffSend) as Promise<HandoffSendResult>,
+  verifyCommit: () => ipcRenderer.invoke(GODMODE_IPC.runVerify) as Promise<RunVerificationResult>,
   dispatchRun: (input: {
     action: RunAction;
     reason?: string;
     blocker?: RunBlockerKind;
     branch?: string;
     prNumber?: number;
+    expectedCommit?: string;
   }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
   clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<RunSnapshot | null>,
   onProjectChanged: (callback: (state: ProjectState) => void) => {

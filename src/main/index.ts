@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { getAppRepoState } from './appRepo.js';
-import { getGithubState, getIssueDetail } from './github.js';
+import { getCommitVerification, getGithubState, getIssueDetail } from './github.js';
 import {
   hasPtySession,
   killAllPtySessions,
@@ -20,11 +20,12 @@ import {
   dispatchRunAction,
   getCurrentRun,
   recordCurrentRunPrompt,
+  recordCurrentRunVerification,
   selectIssueRun,
   selectManualTaskRun,
 } from './run.js';
 import { getCurrentHandoff, promptDigest } from './handoff.js';
-import type { HandoffSendResult, RunSourceDetail } from '../shared/types.js';
+import type { HandoffSendResult, RunSourceDetail, RunVerificationResult } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -81,6 +82,10 @@ const runDispatchSchema = z.object({
   blocker: runBlockerSchema.optional(),
   branch: z.string().min(1).max(255).optional(),
   prNumber: z.number().int().positive().optional(),
+  expectedCommit: z
+    .string()
+    .regex(/^[0-9a-f]{7,40}$/i, 'expectedCommit must be a 7–40 char hex SHA')
+    .optional(),
 });
 const githubIssueSchema = z.object({ issueNumber: z.number().int().positive() });
 const runSelectManualSchema = z.object({
@@ -329,6 +334,28 @@ function handleSendHandoff(): HandoffSendResult {
   return { ok: true, run: started.run };
 }
 
+/**
+ * Run the builder branch/PR/commit verification gate (#9) for the operated
+ * project. Reads live `gh`/`git` state (never agent self-report): resolves the
+ * expected commit from the current run (run-recorded, else local HEAD), compares
+ * it against the PR for the current branch, and derives a verification status.
+ * When a run is active the result is appended to its history for audit. The
+ * verification itself never throws — failures fold into its `status`/`partial`.
+ */
+async function handleVerifyRun(): Promise<RunVerificationResult> {
+  const run = getCurrentRun();
+  const verification = await getCommitVerification(
+    getSelectedProjectRoot(),
+    { expectedCommit: run?.expectedCommit },
+    new Date().toISOString(),
+  );
+  // Persist the result on the current run for an auditable evidence trail. With
+  // no active run, verification still runs (branch + local HEAD) but is not
+  // recorded anywhere — `run` comes back null.
+  const updatedRun = recordCurrentRunVerification(verification);
+  return { verification, run: updatedRun };
+}
+
 function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
   const payload = parseIpcPayload(runDispatchSchema, input);
   if (!payload) {
@@ -401,6 +428,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runClear, handleClearRun);
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
+  ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);

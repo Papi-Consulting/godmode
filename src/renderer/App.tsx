@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AppRepoState,
   AgentRole,
+  CommitVerification,
   ProjectConfigState,
   RolePaneConfig,
   RunAction,
@@ -14,6 +15,7 @@ import { GithubPane } from './components/GithubPane.js';
 import { HandoffPane } from './components/HandoffPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
 import { RunControlPane, STATUS_LABEL, type RunDispatchOptions } from './components/RunControlPane.js';
+import { VerificationPane } from './components/VerificationPane.js';
 
 // UI-only presentation hints keyed by generic pane id. Kept in the renderer so
 // config stays focused on roles/agents, not styling.
@@ -69,6 +71,8 @@ export function App() {
   const [run, setRun] = useState<RunSnapshot | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [verification, setVerification] = useState<CommitVerification | null>(null);
+  const [verifying, setVerifying] = useState(false);
   // Monotonic id for the latest run request. Like the GitHub pane, a run fetch
   // snapshots state in main at invocation time, so a late `getRun()` for the
   // previous operated project must never repopulate stale run state. Mutations
@@ -139,6 +143,24 @@ export function App() {
     setRun(next ?? null);
     setRunError(null);
     setSendError(null);
+    setVerification(null);
+  }, []);
+
+  // Run the branch/PR/commit verification evidence gate. Main reads live
+  // `gh`/`git` state (never agent self-report), records the result on the current
+  // run for audit, and returns the derived verification plus the updated run.
+  const verifyCommit = useCallback(async () => {
+    if (!window.godmode) return;
+    setVerifying(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.verifyCommit();
+      if (seq !== runRequestSeq.current) return;
+      setVerification(result.verification);
+      if (result.run) setRun(result.run);
+    } finally {
+      setVerifying(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -161,6 +183,9 @@ export function App() {
       setRun(null);
       setRunError(null);
       setSendError(null);
+      // Verification is scoped to the operated project's branch/PR; drop the
+      // stale result so the previous repo's evidence never lingers.
+      setVerification(null);
       void refreshRun();
     });
     return () => {
@@ -332,6 +357,12 @@ export function App() {
                 sendError={sendError}
               />
               <RunControlPane run={run} error={runError} onDispatch={dispatchRun} onClear={clearRun} />
+              <VerificationPane
+                verification={verification}
+                loading={verifying}
+                hasRun={run !== null}
+                onVerify={verifyCommit}
+              />
             </section>
           </section>
         </section>

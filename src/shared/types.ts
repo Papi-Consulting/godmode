@@ -293,6 +293,93 @@ export type GithubRepo = {
 };
 
 /**
+ * Outcome of the builder branch/PR/commit verification gate (issue #9). This is
+ * GodMode's **evidence layer**: it compares an expected commit (the run-recorded
+ * builder commit, or the operated project's local `HEAD` as a fallback) against
+ * the commit list of the PR for the current branch, read live from `gh`. The
+ * harness must never treat builder output as valid on agent self-report or PTY
+ * transcript content alone — later reviewer and merge-ready logic consume this
+ * verified status, not raw PR existence or agent claims.
+ *
+ * - `verified`: the expected commit appears on the remote PR and checks are not
+ *   blocking (or the PR is confirmed merged).
+ * - `missing_remote_commit`: a PR exists, but the expected commit is not in its
+ *   commit list / head — typically a local commit that was never pushed.
+ * - `no_pr_for_branch`: no PR was found for the current branch.
+ * - `needs_refresh`: a `gh`/`git` query failed, so the evidence is incomplete and
+ *   the operator should retry rather than trust a partial result.
+ * - `checks_pending`: the commit matched but PR checks are still running.
+ * - `checks_failed`: the commit matched but one or more PR checks failed.
+ * - `needs_human`: an ambiguous/blocking condition that needs a person — no
+ *   commit could be resolved, or the PR was closed without merging.
+ */
+export type CommitVerificationStatus =
+  | 'verified'
+  | 'missing_remote_commit'
+  | 'no_pr_for_branch'
+  | 'needs_refresh'
+  | 'checks_pending'
+  | 'checks_failed'
+  | 'needs_human';
+
+/** Bucketed counts of a PR's normalized checks, for a compact status display. */
+export type CommitCheckSummary = {
+  total: number;
+  passing: number;
+  pending: number;
+  failing: number;
+};
+
+/** Where the expected commit being verified came from. */
+export type ExpectedCommitSource = 'run_recorded' | 'local_head' | 'unknown';
+
+/**
+ * A single commit-verification result for the operated project's current
+ * branch/PR, produced by reading live `gh`/`git` state (never agent self-report).
+ * Always returns a value across IPC; `partial` flags incomplete evidence so the
+ * UI never presents a failed query as a confident result.
+ */
+export type CommitVerification = {
+  status: CommitVerificationStatus;
+  /** User-readable, single-line explanation of the derived status. */
+  message: string;
+  /** Operated-project branch the verification was scoped to, when resolvable. */
+  branch: string | null;
+  /** Full expected commit SHA being verified, or null when unresolved. */
+  expectedCommit: string | null;
+  /** 7-char form of {@link expectedCommit} for compact display. */
+  expectedCommitShort: string | null;
+  expectedCommitSource: ExpectedCommitSource;
+  /** The PR matched to the branch, with the head SHA read from the remote. */
+  pr: {
+    number: number;
+    /** OPEN, MERGED, or CLOSED, read live from GitHub. */
+    state: string;
+    url: string;
+    headRefName: string;
+    /** Remote PR head commit SHA (`headRefOid`). */
+    headSha: string;
+    headShaShort: string;
+  } | null;
+  /** True when the expected commit appears in the PR's commit list. */
+  commitInList: boolean;
+  /** True when the expected commit equals the remote PR head commit. */
+  matchesHead: boolean;
+  checks: CommitCheckSummary;
+  /** PR merge/close state confirmed from GitHub: OPEN, MERGED, CLOSED, or null. */
+  prState: string | null;
+  /** True only when GitHub confirms the PR is merged (not merely closed). */
+  mergeConfirmed: boolean;
+  /**
+   * True when a `gh`/`git` query failed so the evidence is incomplete. The UI
+   * must not present a partial verification as a confident result.
+   */
+  partial: boolean;
+  /** ISO timestamp the verification was produced (main owns the clock). */
+  fetchedAt: string;
+};
+
+/**
  * A read-only snapshot of the **operated project's** GitHub state — the repo
  * opened inside GodMode, never the GodMode app repo itself unless the operator
  * has explicitly opened GodMode on its own repo (self-dogfooding). Issues and
@@ -482,6 +569,31 @@ export type RunPromptLogEntry = {
   promptChars: number;
 };
 
+/**
+ * One recorded commit-verification check against the run, appended whenever the
+ * operator (or, later, the orchestrator) runs the branch/PR/commit evidence gate
+ * (issue #9). Persisting the derived status with a timestamp and the source of
+ * the expected commit gives the run an auditable history of *what was verified
+ * when*, so a later `merge_ready` decision consumes recorded evidence rather than
+ * re-trusting a transient query or an agent claim.
+ */
+export type RunVerificationLogEntry = {
+  /** ISO timestamp the verification was recorded. */
+  at: string;
+  /** Derived verification status at that moment. */
+  status: CommitVerificationStatus;
+  /** Expected commit (full SHA) that was checked, or null when unresolved. */
+  expectedCommit: string | null;
+  /** Where the expected commit came from (run-recorded vs local HEAD). */
+  source: ExpectedCommitSource;
+  /** PR number the commit was checked against, when one was found. */
+  prNumber?: number;
+  /** PR state confirmed from GitHub (OPEN/MERGED/CLOSED), when a PR was found. */
+  prState?: string;
+  /** Single-line human summary mirroring {@link CommitVerification.message}. */
+  summary: string;
+};
+
 /** One logged state change, appended on every successful transition. */
 export type RunTransitionLogEntry = {
   /** ISO timestamp the transition was applied. */
@@ -518,6 +630,13 @@ export type RunSnapshot = {
   branch?: string;
   /** PR number, once opened. */
   prNumber?: number;
+  /**
+   * The commit GodMode expects to verify on the remote PR — recorded from the
+   * builder phase (e.g. when the builder opens a PR or pushes a fix). When unset,
+   * the verification gate falls back to the operated project's local `HEAD`. This
+   * is the "run-recorded expected commit" half of the issue #9 evidence gate.
+   */
+  expectedCommit?: string;
   /** 1-based fix-loop counter; advances each time a fix cycle is requested. */
   cycle: number;
   maxCycles: number;
@@ -533,6 +652,8 @@ export type RunSnapshot = {
   log: RunTransitionLogEntry[];
   /** Append-only audit of prompts sent to agents (builder handoffs, fixes). */
   prompts: RunPromptLogEntry[];
+  /** Append-only history of commit-verification checks against this run (#9). */
+  verifications: RunVerificationLogEntry[];
   createdAt: string;
   updatedAt: string;
 };
@@ -604,3 +725,15 @@ export type HandoffRejectionCode =
 export type HandoffSendResult =
   | { ok: true; run: RunSnapshot }
   | { ok: false; code: HandoffRejectionCode; error: string; run: RunSnapshot | null };
+
+/**
+ * Result of running the commit-verification evidence gate (issue #9). The
+ * `verification` is always present (it never throws across IPC — failures fold
+ * into its `status`/`partial`). `run` carries the snapshot with the verification
+ * appended to its history when an active run exists, or null when verification was
+ * run without a bound run (branch/local-HEAD only).
+ */
+export type RunVerificationResult = {
+  verification: CommitVerification;
+  run: RunSnapshot | null;
+};

@@ -183,6 +183,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [ ] GitHub read-only issue/PR pane.
 - [x] Agent adapter registry.
 - [x] Builder handoff: bind selected issue/manual task to a reviewed prompt and send to the builder.
+- [x] Commit verification: prove the expected builder commit is on the remote PR before trusting builder output (`docs/architecture/commit-verification.md`).
 - [ ] Claude builder run.
 - [ ] Codex reviewer runs.
 - [ ] Automatic review/fix loop.

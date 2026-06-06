@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  CommitVerification,
   RunAction,
   RunActionResult,
   RunBlockerKind,
@@ -9,6 +10,7 @@ import type {
   RunSourceType,
   RunStatus,
   RunTransitionLogEntry,
+  RunVerificationLogEntry,
 } from '../shared/types.js';
 
 /**
@@ -165,6 +167,12 @@ export type ApplyActionOptions = {
   branch?: string;
   /** PR number to record (e.g. on `open_pr`). */
   prNumber?: number;
+  /**
+   * Expected commit SHA to record from the builder phase (e.g. on `open_pr` or
+   * `push_fix`). Becomes the run-recorded commit the verification gate (#9)
+   * checks against the remote PR, in place of the local-HEAD fallback.
+   */
+  expectedCommit?: string;
   /** Override the timestamp; primarily for deterministic tests. */
   now?: string;
 };
@@ -206,10 +214,11 @@ export function applyAction(
   const now = options.now ?? new Date().toISOString();
   const next: RunSnapshot = { ...run, status: to, updatedAt: now, log: [...run.log] };
 
-  // Branch/PR enrichment is independent of the action: record whatever was
-  // provided so the snapshot reflects the latest known coordinates.
+  // Branch/PR/commit enrichment is independent of the action: record whatever
+  // was provided so the snapshot reflects the latest known coordinates.
   if (options.branch !== undefined) next.branch = options.branch;
   if (options.prNumber !== undefined) next.prNumber = options.prNumber;
+  if (options.expectedCommit !== undefined) next.expectedCommit = options.expectedCommit;
 
   // Pause/resume bookkeeping: remember where we paused from, and clear it on the
   // way out (whether via resume or cancel).
@@ -286,6 +295,7 @@ export function createRun(input: CreateRunInput = {}): RunSnapshot {
     availableActions: [],
     log: [],
     prompts: [],
+    verifications: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -425,6 +435,38 @@ export function recordPromptSent(run: RunSnapshot, input: RecordPromptInput): Ru
 export function recordCurrentRunPrompt(input: RecordPromptInput): RunSnapshot | null {
   if (!currentRun) return null;
   currentRun = recordPromptSent(currentRun, input);
+  return currentRun;
+}
+
+/**
+ * Append a commit-verification result to a run's history, returning a new
+ * snapshot (the input is never mutated, matching {@link applyAction}). This is
+ * the evidence-layer audit trail (#9): the derived status, the expected commit
+ * and where it came from, and the matched PR are recorded with a timestamp so a
+ * later merge-ready decision consumes recorded evidence rather than re-trusting a
+ * transient query. The full {@link CommitVerification} is not stored — the
+ * single-line summary plus key fields are enough for audit without bloat.
+ */
+export function recordVerification(run: RunSnapshot, verification: CommitVerification): RunSnapshot {
+  const entry: RunVerificationLogEntry = {
+    at: verification.fetchedAt,
+    status: verification.status,
+    expectedCommit: verification.expectedCommit,
+    source: verification.expectedCommitSource,
+    prNumber: verification.pr?.number,
+    prState: verification.pr?.state,
+    summary: verification.message,
+  };
+  return { ...run, verifications: [...run.verifications, entry], updatedAt: verification.fetchedAt };
+}
+
+/**
+ * Record a commit-verification result against the current run (controller
+ * wrapper). Returns the updated snapshot, or null when there is no active run.
+ */
+export function recordCurrentRunVerification(verification: CommitVerification): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = recordVerification(currentRun, verification);
   return currentRun;
 }
 

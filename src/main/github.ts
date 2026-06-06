@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type {
+  CommitVerification,
+  ExpectedCommitSource,
   GithubActivePullRequest,
   GithubCheck,
   GithubComment,
@@ -14,6 +16,7 @@ import type {
   GithubState,
   GithubStatus,
 } from '../shared/types.js';
+import { deriveVerification, type VerificationEvidence, type VerifiedPr } from './verify.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -158,6 +161,27 @@ async function currentBranch(cwd: string): Promise<string | null> {
     });
     const branch = stdout.trim();
     return branch.length > 0 ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the operated project's local `HEAD` commit SHA, or null when it can't
+ * be read (empty repo, not a git repo, detached with no commit). Used as the
+ * fallback "expected commit" when a run has not recorded one from the builder
+ * phase. Read-only.
+ */
+async function headCommit(cwd: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+      cwd,
+      env: buildGithubEnv(),
+      timeout: COMMAND_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER,
+    });
+    const sha = stdout.trim();
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
   } catch {
     return null;
   }
@@ -437,6 +461,116 @@ export async function getIssueDetail(
     comments,
   };
   return { status: 'ok', issue };
+}
+
+/** Options for the commit-verification gate. */
+export type CommitVerificationOptions = {
+  /**
+   * The run-recorded expected commit from the builder phase, if any. When
+   * provided it is the SHA verified against the remote PR; when omitted, the
+   * operated project's local `HEAD` is used as the fallback.
+   */
+  expectedCommit?: string;
+};
+
+/**
+ * Fetch the PR matched to a branch with the commit/check evidence the
+ * verification gate compares. `gh pr view <branch>` exits non-zero when no PR
+ * exists, which is treated as "no PR" (`{ value: null, failed: false }`) rather
+ * than an error — every other failure marks the evidence partial.
+ */
+async function fetchVerificationPr(cwd: string, branch: string | null): Promise<Fetched<VerifiedPr | null>> {
+  const args = ['pr', 'view'];
+  if (branch) args.push(branch);
+  args.push('--json', 'number,state,url,headRefName,headRefOid,commits,statusCheckRollup');
+  const result = await runGh(args, cwd);
+  if (!result.ok) {
+    const lower = result.message.toLowerCase();
+    const noPr =
+      lower.includes('no pull requests found') ||
+      lower.includes('no open pull requests') ||
+      lower.includes('no closed pull requests');
+    return { value: null, failed: !noPr };
+  }
+
+  type RawCommit = { oid?: string };
+  type Raw = {
+    number?: number;
+    state?: string;
+    url?: string;
+    headRefName?: string;
+    headRefOid?: string;
+    commits?: RawCommit[];
+    statusCheckRollup?: RawCheck[];
+  };
+  const raw = parseJson<Raw | null>(result.stdout, null);
+  if (!raw || typeof raw.number !== 'number') return { value: null, failed: true };
+
+  const pr: VerifiedPr = {
+    number: raw.number,
+    state: (raw.state ?? '').toUpperCase(),
+    url: raw.url ?? '',
+    headRefName: raw.headRefName ?? '',
+    headSha: raw.headRefOid ?? '',
+    commits: (raw.commits ?? []).map((commit) => commit.oid ?? '').filter(Boolean),
+    checks: (raw.statusCheckRollup ?? []).map(normalizeCheck),
+  };
+  return { value: pr, failed: false };
+}
+
+/**
+ * Run the builder branch/PR/commit verification gate for the operated project
+ * (issue #9). This is GodMode's evidence layer: it resolves the branch and the
+ * expected commit (run-recorded, else local `HEAD`), reads the PR for that branch
+ * from `gh` with its commit list and checks, and derives a deterministic
+ * {@link CommitVerification} via {@link deriveVerification}. Like the rest of this
+ * module it shells out read-only and never throws — every failure folds into the
+ * returned status (`needs_refresh`/`needs_human`) and `partial` flag so the UI
+ * never presents a failed query as a confident result. `fetchedAt` is supplied by
+ * the caller so the function stays deterministic.
+ */
+export async function getCommitVerification(
+  projectRoot: string,
+  options: CommitVerificationOptions,
+  fetchedAt: string,
+): Promise<CommitVerification> {
+  const cwd = path.resolve(projectRoot);
+
+  const branch = await currentBranch(cwd);
+
+  // Run-recorded commit wins; otherwise fall back to the operated project's
+  // local HEAD. The source is surfaced so the operator can see what was checked.
+  let expectedCommit: string | null;
+  let expectedCommitSource: ExpectedCommitSource;
+  if (options.expectedCommit) {
+    expectedCommit = options.expectedCommit;
+    expectedCommitSource = 'run_recorded';
+  } else {
+    expectedCommit = await headCommit(cwd);
+    expectedCommitSource = expectedCommit ? 'local_head' : 'unknown';
+  }
+
+  const pr = await fetchVerificationPr(cwd, branch);
+
+  const evidence: VerificationEvidence = {
+    branch,
+    expectedCommit,
+    expectedCommitSource,
+    queryFailed: pr.failed,
+    pr: pr.value,
+  };
+
+  const verification = deriveVerification(evidence, fetchedAt);
+
+  // When the PR query genuinely failed, surface the underlying `gh` reason in
+  // place of the generic needs_refresh copy so the operator knows whether to
+  // authenticate, install `gh`, or just retry.
+  if (pr.failed) {
+    const probe = await runGh(['repo', 'view', '--json', 'name'], cwd);
+    if (!probe.ok) verification.message = probe.message;
+  }
+
+  return verification;
 }
 
 /** Join a short list with commas and a trailing "and": ["a","b","c"] → "a, b, and c". */

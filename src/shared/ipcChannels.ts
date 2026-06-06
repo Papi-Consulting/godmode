@@ -20,6 +20,7 @@ export const GODMODE_IPC = {
   runClear: 'godmode:run:clear',
   runHandoffGet: 'godmode:run:handoff:get',
   runHandoffSend: 'godmode:run:handoff:send',
+  runVerify: 'godmode:run:verify',
   ptyStart: 'godmode:pty:start',
   ptyWrite: 'godmode:pty:write',
   ptyResize: 'godmode:pty:resize',

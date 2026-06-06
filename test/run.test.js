@@ -14,7 +14,9 @@ import {
   dispatchRunAction,
   getCurrentRun,
   recordCurrentRunPrompt,
+  recordCurrentRunVerification,
   recordPromptSent,
+  recordVerification,
   selectIssueRun,
   selectManualTaskRun,
 } from '../dist/main/run.js';
@@ -366,4 +368,77 @@ test('controller: selectIssueRun, dispatchRunAction, and clearRun', () => {
 
   clearRun();
   assert.equal(getCurrentRun(), null);
+});
+
+test('createRun initializes an empty verification history', () => {
+  const run = createRun({ issueNumber: 9, now: NOW, id: 'run-verify' });
+  assert.deepEqual(run.verifications, []);
+});
+
+test('applyAction records the run-recorded expected commit from the builder phase', () => {
+  const run = createRun({ issueNumber: 9, now: NOW, id: 'run-commit' });
+  const selected = applyAction(run, 'select_issue', { now: NOW }).run;
+  const ready = applyAction(selected, 'mark_ready', { now: NOW }).run;
+  const building = applyAction(ready, 'start_builder', { now: NOW }).run;
+  const opened = applyAction(building, 'open_pr', {
+    now: NOW,
+    branch: 'claude/issue-9',
+    prNumber: 9,
+    expectedCommit: 'c'.repeat(40),
+  });
+  assert.equal(opened.ok, true);
+  assert.equal(opened.run.expectedCommit, 'c'.repeat(40));
+  assert.equal(opened.run.branch, 'claude/issue-9');
+  assert.equal(opened.run.prNumber, 9);
+});
+
+/** A minimal CommitVerification, as main would hand to the recorder. */
+function verification(overrides = {}) {
+  return {
+    status: 'verified',
+    message: 'Commit ccccccc is on PR #9 (1/1 checks passing).',
+    branch: 'claude/issue-9',
+    expectedCommit: 'c'.repeat(40),
+    expectedCommitShort: 'ccccccc',
+    expectedCommitSource: 'run_recorded',
+    pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'c'.repeat(40), headShaShort: 'ccccccc' },
+    commitInList: true,
+    matchesHead: true,
+    checks: { total: 1, passing: 1, pending: 0, failing: 0 },
+    prState: 'OPEN',
+    mergeConfirmed: false,
+    partial: false,
+    fetchedAt: NOW,
+    ...overrides,
+  };
+}
+
+test('recordVerification appends an audit entry without mutating the input', () => {
+  const run = createRun({ issueNumber: 9, now: NOW, id: 'run-rec' });
+  const updated = recordVerification(run, verification());
+  assert.equal(run.verifications.length, 0, 'input snapshot is not mutated');
+  assert.equal(updated.verifications.length, 1);
+  const entry = updated.verifications[0];
+  assert.equal(entry.status, 'verified');
+  assert.equal(entry.expectedCommit, 'c'.repeat(40));
+  assert.equal(entry.source, 'run_recorded');
+  assert.equal(entry.prNumber, 9);
+  assert.equal(entry.prState, 'OPEN');
+  assert.equal(entry.at, NOW);
+  assert.equal(updated.updatedAt, NOW);
+});
+
+test('recordCurrentRunVerification records against the live run, null when none', () => {
+  clearRun();
+  assert.equal(recordCurrentRunVerification(verification()), null);
+
+  selectIssueRun({ issueNumber: 9, issueTitle: 'Verify commit state' });
+  const first = recordCurrentRunVerification(verification({ status: 'missing_remote_commit' }));
+  assert.equal(first.verifications.length, 1);
+  assert.equal(first.verifications[0].status, 'missing_remote_commit');
+
+  const second = recordCurrentRunVerification(verification({ status: 'verified' }));
+  assert.equal(second.verifications.length, 2, 'history is append-only');
+  assert.equal(second.verifications[1].status, 'verified');
+  clearRun();
 });

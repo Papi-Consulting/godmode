@@ -7,6 +7,12 @@ transition rules scattered across UI components. This is the state/control
 foundation the builder (#8), PR detection (#9), reviewer (#10), and blocker-loop
 (#11) work builds on.
 
+The branch/PR/commit verification gate (#9) is the **evidence layer** layered on
+top of this machine: it proves the expected builder commit is present on the
+remote PR (read from `gh`/`git`, never agent self-report) and records the result
+on the run. Later `merge_ready`/reviewer logic must consume that verified status,
+not plain PR existence — see `docs/architecture/commit-verification.md`.
+
 ## Boundaries
 
 | Concern | Owner |

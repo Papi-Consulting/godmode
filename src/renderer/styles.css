@@ -1318,6 +1318,67 @@ p {
   font-size: 0.68rem;
 }
 
+/* Commit verification evidence panel (issue #9). */
+.verify-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.verify-pane > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.verify-grid {
+  margin: 0;
+}
+
+.verify-source {
+  color: var(--text-soft);
+  font-size: 0.66rem;
+}
+
+.verify-match.ok {
+  color: var(--green);
+}
+
+.verify-match.warn {
+  color: var(--amber);
+}
+
+.verify-match.no {
+  color: var(--red);
+}
+
+.verify-partial {
+  border: 1px solid var(--amber);
+  border-left-width: 3px;
+  padding: 4px 8px;
+  font-size: 0.68rem;
+  color: var(--amber);
+}
+
+.verify-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verify-meta {
+  color: var(--text-soft);
+  font-size: 0.66rem;
+}
+
+.verify-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 /* Issue selection in the GitHub pane. */
 .issue-start {
   padding: 1px 8px;
