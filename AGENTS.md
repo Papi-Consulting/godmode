@@ -1,8 +1,19 @@
 # GodMode Agent Harness
 
-This repository is the execution harness for **GodMode**, a local tmux-style, bring-your-own-agent coding dashboard.
+This repository is the **GodMode app repo** — the execution harness and source for **GodMode**, a local tmux-style, bring-your-own-agent coding dashboard.
 
 GodMode is being built to dogfood itself. Treat this file as the operating contract for any agent working in this repo.
+
+## App Repo vs Operated Project
+
+GodMode always distinguishes two repository contexts, and so must every agent:
+
+- **GodMode app repo** — this repository: the Electron app code, docs, config defaults, and development tasks.
+- **Operated project** — the external repo/project opened inside GodMode and worked on by configured agents.
+
+Harness detection, PTY working directories, and GitHub issue/PR lookups all scope to the **operated project root** — never implicitly to the GodMode app repo. Issues and PRs shown in the GitHub pane belong to the operated project.
+
+**Self-dogfooding is the special case:** when GodMode is opened on its own repo, the operated project and the app repo point at the same directory. The contexts coincide on disk but stay conceptually distinct — agents act on it as the *operated project*, exactly as for any external repo. The app surfaces this with a "dogfooding" badge (`ProjectState.isAppRepo`); nothing branches behavior on it. See `docs/architecture/app-vs-operated-project.md` for the full model.
 
 ## Core Product Direction
 
@@ -178,7 +189,7 @@ Non-blocking preferences should be clearly labeled as non-blocking.
 - No production deploy automation in v1.
 - No auto-merge to main in v1.
 - No credential scraping from local env files or unrelated profiles.
-- Agent commands must run inside the selected project directory unless explicitly configured otherwise.
+- Agent commands must run inside the selected operated-project directory (not the GodMode app repo) unless explicitly configured otherwise.
 - Destructive git actions require explicit human approval.
 - Preserve user control: pause/cancel/override must be possible for long-running agent sessions.
 

@@ -7,10 +7,13 @@ import type {
   ProjectHarnessState,
   ProjectState,
 } from '../shared/types.js';
+import { getAppRepoRoot } from './appRepo.js';
 
-// The project root every project/PTY operation is scoped to. Defaults to the
-// process working directory so the app is usable immediately, but selecting a
-// project re-points it. PTY launches must read this rather than process.cwd().
+// The **operated project** root every project/PTY/GitHub operation is scoped
+// to. Defaults to the process working directory so the app is usable
+// immediately, but selecting a project re-points it. This is the operated
+// project, not the GodMode app repo — PTY launches must read this rather than
+// process.cwd(), and it is never silently assumed to be GodMode's own repo.
 let selectedProjectRoot: string = process.cwd();
 
 export function getSelectedProjectRoot(): string {
@@ -149,8 +152,32 @@ export function detectHarness(root: string): ProjectHarnessState {
   return { status, requirements, missingRequired };
 }
 
+/**
+ * Whether the operated-project root resolves to the GodMode app repo itself
+ * (self-dogfooding). Compares canonicalized paths so a symlinked or
+ * differently-cased path to the same directory is still recognized. The
+ * conceptual boundary is preserved regardless: this only flags that the two
+ * contexts currently point at the same directory.
+ */
+function isSameAsAppRepo(root: string): boolean {
+  const appRoot = getAppRepoRoot();
+  const canonical = (p: string): string => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  return canonical(root) === canonical(appRoot);
+}
+
 function buildProjectState(root: string): ProjectState {
-  return { root, name: path.basename(root), harness: detectHarness(root) };
+  return {
+    root,
+    name: path.basename(root),
+    harness: detectHarness(root),
+    isAppRepo: isSameAsAppRepo(root),
+  };
 }
 
 /** Current project state for the selected root. */
@@ -174,6 +201,9 @@ export function selectProject(input: string): ProjectState {
       root: attempted || null,
       name: attempted ? path.basename(attempted) : null,
       harness: unreadable(resolved.error),
+      // An unresolvable path is not treated as the app repo; the previously
+      // selected (working) project root is left unchanged.
+      isAppRepo: false,
     };
   }
 

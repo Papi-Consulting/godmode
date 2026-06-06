@@ -8,6 +8,17 @@ GodMode is a local, macOS-first, tmux-style multi-agent coding dashboard. It ope
 
 The product is inspired by QuadWork's multi-agent dashboard feel, but GodMode is explicitly bring-your-own-agent native and harness-driven.
 
+## App Repo vs Operated Project
+
+GodMode keeps two repository contexts distinct at all times:
+
+- **GodMode app repo** — the repository that ships the Electron app, its docs, and config defaults (this repo while developing GodMode).
+- **Operated project** — the external repo opened inside GodMode and worked on by configured agents.
+
+Harness detection, PTY working directories, and GitHub issue/PR lookups all scope to the **operated project root**, never implicitly to the GodMode app repo. Issues/PRs in the GitHub pane belong to the operated project. The main process exposes the app repo's identity (name/version/root) separately over IPC (`godmode:app:get`) so the UI can show both contexts.
+
+**Self-dogfooding** — building GodMode by running GodMode on its own repo — is a deliberate special case: the operated project and the app repo point at the same directory. The contexts coincide on disk but the conceptual boundary holds; agents treat the directory as the operated project. `ProjectState.isAppRepo` flags this and the project bar shows a "dogfooding" badge, but no harness/PTY/GitHub behavior branches on it. See `docs/architecture/app-vs-operated-project.md`.
+
 ## Default Karan Workflow
 
 - **Head/operator:** Hermes
@@ -73,7 +84,7 @@ GodMode opens on a selected project root (resolved and validated in the Electron
 - `missing` — no required files present.
 - `unreadable` — the path is not a readable directory (or none selected).
 
-Required: `AGENTS.md` plus `README.md` or `docs/spec.md`. Optional (reported but non-gating): `.agentic/godmode.yaml`, `docs/review/`, `docs/architecture/`, `docs/conventions/`, `docs/friction/`. Detection is path-relative to the selected root, not hardcoded to GodMode's own layout. PTY sessions launch with the selected root as their working directory.
+Required: `AGENTS.md` plus `README.md` or `docs/spec.md`. Optional (reported but non-gating): `.agentic/godmode.yaml`, `docs/review/`, `docs/architecture/`, `docs/conventions/`, `docs/friction/`. Detection is path-relative to the selected **operated-project** root, not hardcoded to (or implicitly the) GodMode app repo's own layout. PTY sessions launch with the selected operated-project root as their working directory; changing the operated project tears down live PTY sessions so a terminal never outlives the project it was spawned in.
 
 ## Role/Agent Config
 

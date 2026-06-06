@@ -59,12 +59,40 @@ export type ProjectHarnessState = {
   missingRequired: string[];
 };
 
+/**
+ * Identity of the GodMode **application repository** — the repo that ships the
+ * Electron app, its docs, and config defaults. This is deliberately distinct
+ * from the **operated project** (`ProjectState`), the external repo opened
+ * inside GodMode and worked on by agents. The two only coincide while
+ * self-dogfooding GodMode on its own repo; even then the conceptual boundary
+ * holds — see docs/architecture/app-vs-operated-project.md.
+ */
+export type AppRepoState = {
+  /** Absolute path to the GodMode app repo root (where the app runs from). */
+  root: string;
+  /** App name, from the GodMode package.json. */
+  name: string;
+  /** App version, from the GodMode package.json. */
+  version: string;
+};
+
+/**
+ * State of the **operated project** — the repo currently opened inside GodMode
+ * and acted on by agents, harness detection, PTY launches, and GitHub lookups.
+ * This is never assumed to be the GodMode app repo (see {@link AppRepoState}).
+ */
 export type ProjectState = {
-  /** Absolute, resolved project root, or null when none/invalid. */
+  /** Absolute, resolved operated-project root, or null when none/invalid. */
   root: string | null;
   /** Display name (basename of the root). */
   name: string | null;
   harness: ProjectHarnessState;
+  /**
+   * True when the operated-project root resolves to the GodMode app repo itself
+   * (self-dogfooding). The two contexts coincide on disk but stay conceptually
+   * distinct: agents still treat this as the operated project, not as the app.
+   */
+  isAppRepo: boolean;
 };
 
 /**
@@ -135,9 +163,12 @@ export type GithubRepo = {
 };
 
 /**
- * A read-only snapshot of the selected repo's GitHub state. Always returns a
- * value (never throws across IPC); `status` carries why a partial/empty result
- * was produced so the UI can render user-readable guidance.
+ * A read-only snapshot of the **operated project's** GitHub state — the repo
+ * opened inside GodMode, never the GodMode app repo itself unless the operator
+ * has explicitly opened GodMode on its own repo (self-dogfooding). Issues and
+ * PRs here belong to the operated project. Always returns a value (never throws
+ * across IPC); `status` carries why a partial/empty result was produced so the
+ * UI can render user-readable guidance.
  */
 export type GithubState = {
   status: GithubStatus;

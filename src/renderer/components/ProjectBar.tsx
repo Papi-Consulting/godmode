@@ -47,10 +47,18 @@ export function ProjectBar() {
   const optional = harness?.requirements.filter((r) => r.kind === 'optional') ?? [];
 
   return (
-    <section className="project-bar" aria-label="Project selector and harness status">
+    <section className="project-bar" aria-label="Operated project selector and harness status">
       <div className="project-id">
-        <span className="section-kicker">Project</span>
+        <span className="section-kicker">Operated project</span>
         <strong title={project?.root ?? undefined}>{project?.root ?? 'No project selected'}</strong>
+        {project?.isAppRepo ? (
+          <span
+            className="dogfood-badge"
+            title="The operated project is the GodMode app repo itself. Agents act on it as the operated project, not as the app."
+          >
+            dogfooding · same as app repo
+          </span>
+        ) : null}
       </div>
 
       <div className="project-open">

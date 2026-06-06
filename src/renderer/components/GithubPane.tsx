@@ -187,7 +187,7 @@ export function GithubPane() {
     <section className="panel github-pane">
       <header className="panel-header">
         <div>
-          <span className="section-kicker">GitHub</span>
+          <span className="section-kicker">GitHub · operated project</span>
           <strong>Issues · Pull Requests · Reviews</strong>
         </div>
         <span className={`header-chip ${chip.tone}`}>{state ? chip.label : 'connecting…'}</span>

@@ -128,6 +128,13 @@ Once a working prototype exists, GodMode should be used to build GodMode.
 
 Therefore the GodMode repo harness must be optimized from the beginning for agents to read and act correctly with minimal Hermes micromanagement.
 
+GodMode must keep two repository contexts distinct at all times:
+
+- **GodMode app repo** — the repo that ships the Electron app, its docs, and config defaults.
+- **Operated project** — the external repo opened inside GodMode and worked on by agents.
+
+Harness detection, PTY working directories, and GitHub issue/PR lookups always scope to the **operated project root**, never implicitly to the GodMode app repo. Self-dogfooding is the special case where both point at the same directory; the contexts coincide on disk but the conceptual boundary must not collapse. The app surfaces a "dogfooding" badge for this case, but no harness/PTY/GitHub behavior branches on it. See `docs/architecture/app-vs-operated-project.md`.
+
 ---
 
 ## 4. V1 Technical Direction

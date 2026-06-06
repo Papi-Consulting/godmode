@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { getAppRepoState } from './appRepo.js';
 import { getGithubState } from './github.js';
 import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, writeToPtySession } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
@@ -101,6 +102,10 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // Identity of the GodMode app repo itself, kept separate from the operated
+  // project so the UI can show both contexts and flag self-dogfooding.
+  ipcMain.handle('godmode:app:get', () => getAppRepoState());
+
   ipcMain.handle('godmode:project:get', () => getProjectState());
 
   ipcMain.handle('godmode:config:get', () => getConfigState());

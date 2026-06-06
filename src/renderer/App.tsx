@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AgentRole, ProjectConfigState, RolePaneConfig } from '../shared/types.js';
+import type { AppRepoState, AgentRole, ProjectConfigState, RolePaneConfig } from '../shared/types.js';
 import { AgentPane } from './components/AgentPane.js';
 import { GithubPane } from './components/GithubPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
@@ -56,6 +56,17 @@ const schedulerLines = [
 
 export function App() {
   const [config, setConfig] = useState<ProjectConfigState | null>(null);
+  const [appRepo, setAppRepo] = useState<AppRepoState | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void window.godmode?.getApp().then((state) => {
+      if (active && state) setAppRepo(state);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -103,9 +114,9 @@ export function App() {
 
       <main className="app-shell">
         <header className="top-bar">
-          <div className="brand-lockup">
-            <strong>GodMode</strong>
-            <span>Hermes command cockpit</span>
+          <div className="brand-lockup" title={appRepo ? `GodMode app repo · ${appRepo.root}` : undefined}>
+            <strong>GodMode{appRepo ? ` v${appRepo.version}` : ''}</strong>
+            <span>{appRepo ? 'app repo · operates an external project' : 'Hermes command cockpit'}</span>
           </div>
           <div className="top-metrics" aria-label="Run telemetry">
             <span>Today <strong>0.8h</strong></span>
