@@ -1089,3 +1089,153 @@ p {
   width: 100%;
   background: #090b0d;
 }
+
+/* --- Run control ---------------------------------------------------------- */
+
+.run-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.run-control > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.run-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.run-state-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.run-state-grid div {
+  min-width: 0;
+}
+
+.run-state-grid dt {
+  color: var(--text-soft);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.run-state-grid dd {
+  margin: 0;
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.74rem;
+  color: #d8dee8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-reason {
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  padding: 6px 8px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: #d7dde7;
+  overflow-wrap: anywhere;
+}
+
+.run-reason.warn {
+  border-left-color: var(--amber);
+}
+
+.run-reason.error {
+  border-left-color: var(--red);
+}
+
+.run-reason.success {
+  border-left-color: var(--green);
+}
+
+.run-blocker {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  color: var(--amber);
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.run-last-transition {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.7rem;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.run-last-transition .section-kicker {
+  margin-bottom: 2px;
+}
+
+.run-action-name {
+  color: var(--brand-bright);
+}
+
+.run-error {
+  color: var(--red);
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.danger-action {
+  border-color: rgba(255, 99, 125, 0.52);
+  color: var(--red);
+}
+
+.danger-action:hover:not(:disabled) {
+  border-color: var(--red);
+  color: #fff;
+}
+
+.run-footer-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.run-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-hint {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+/* Issue selection in the GitHub pane. */
+.issue-start {
+  padding: 1px 8px;
+  font-size: 0.64rem;
+}
+
+li.issue-active .feed-num,
+li.issue-active .feed-title {
+  color: var(--brand-bright);
+}

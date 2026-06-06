@@ -350,8 +350,125 @@ export type RunStatus =
   | 'fix_pushed'
   | 'reviewers_rerunning'
   | 'merge_ready'
+  // Terminal lifecycle endpoints from the spec state machine (section 8). These
+  // are distinct outcomes (a human merged; the run is filed away) that cannot be
+  // expressed by a reason on another status, so they are first-class states.
+  | 'karan_merged'
+  | 'closed'
   | 'paused'
   | 'cancelled'
   | 'needs_human'
   | 'agent_failed'
   | 'max_cycles_exceeded';
+
+/**
+ * Where a run's work originates. Mirrors the spec `Run.sourceType` (section
+ * 11.2). Only `github_issue` and `manual_task` are exercised by the v1
+ * dashboard; the others are reserved so the model does not need reshaping later.
+ */
+export type RunSourceType = 'github_issue' | 'linear_issue' | 'manual_task' | 'pr_review';
+
+/**
+ * The spec lists several environment/PR blocker conditions as state-machine
+ * states (`PR_CONFLICTED`, `TESTS_FAILED`, `CHECKS_UNSTABLE`, `HARNESS_MISSING`,
+ * `REPO_DIRTY`). Rather than multiply near-identical terminal states, GodMode
+ * represents them as *reasons* carried on a single operator-actionable status
+ * (`needs_human`): every one of these is a "stop and get a human" condition, and
+ * collapsing them keeps the transition graph small and deterministic while still
+ * recording exactly which blocker fired. The mapping is explicit here so it is
+ * never ambiguous.
+ */
+export type RunBlockerKind =
+  | 'pr_conflicted'
+  | 'tests_failed'
+  | 'checks_unstable'
+  | 'harness_missing'
+  | 'repo_dirty';
+
+/**
+ * Operator/system actions that drive run transitions. Every state change goes
+ * through one of these via the central guard — the renderer never invents its
+ * own transition rules. Forward-workflow actions advance the happy path;
+ * `pause`/`resume`/`cancel`/`flag_needs_human`/`report_agent_failed`/
+ * `exceed_max_cycles`/`close` are the interrupts and endpoints.
+ */
+export type RunAction =
+  | 'select_issue'
+  | 'require_spec'
+  | 'mark_ready'
+  | 'start_builder'
+  | 'open_pr'
+  | 'start_reviewers'
+  | 'synthesize_reviews'
+  | 'request_fix'
+  | 'push_fix'
+  | 'rerun_reviewers'
+  | 'mark_merge_ready'
+  | 'mark_merged'
+  | 'pause'
+  | 'resume'
+  | 'cancel'
+  | 'flag_needs_human'
+  | 'report_agent_failed'
+  | 'exceed_max_cycles'
+  | 'close';
+
+/** One logged state change, appended on every successful transition. */
+export type RunTransitionLogEntry = {
+  /** ISO timestamp the transition was applied. */
+  at: string;
+  from: RunStatus;
+  to: RunStatus;
+  action: RunAction;
+  /** Operator/system note or blocker explanation, when one was supplied. */
+  reason?: string;
+};
+
+/**
+ * In-memory snapshot of the current run. Shaped after the spec `Run` type
+ * (section 11.2) plus the fields the dashboard needs to render valid actions and
+ * recent history. Persistence is in-memory for this issue, but the shape is
+ * directly serializable so it can later be written to `.godmode/runs/` or
+ * SQLite without reshaping.
+ */
+export type RunSnapshot = {
+  id: string;
+  sourceType: RunSourceType;
+  /** Stable source identifier (issue number as string, task id, etc.). */
+  sourceId: string;
+  /** Convenience copy of the GitHub issue number when source is an issue. */
+  issueNumber?: number;
+  issueTitle?: string;
+  status: RunStatus;
+  /** Working branch, once known. */
+  branch?: string;
+  /** PR number, once opened. */
+  prNumber?: number;
+  /** 1-based fix-loop counter; advances each time a fix cycle is requested. */
+  cycle: number;
+  maxCycles: number;
+  /** Why the run is paused/blocked/failed/needs-human, when relevant. */
+  reason?: string;
+  /** Which spec blocker condition mapped onto `needs_human`, when relevant. */
+  blocker?: RunBlockerKind;
+  /** Status to return to on `resume`; set only while `paused`. */
+  resumeStatus?: RunStatus;
+  /** Actions valid from the current state — the renderer renders only these. */
+  availableActions: RunAction[];
+  /** Append-only transition history (in memory for this issue). */
+  log: RunTransitionLogEntry[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Why a run action was rejected, so the UI can explain the failure precisely. */
+export type RunRejectionCode = 'no_run' | 'invalid_transition' | 'invalid_payload';
+
+/**
+ * Result of a run mutation. On success the new snapshot is returned; on failure
+ * the action was rejected with no state mutation and `run` is the unchanged
+ * current snapshot (or null when there is no run at all).
+ */
+export type RunActionResult =
+  | { ok: true; run: RunSnapshot }
+  | { ok: false; code: RunRejectionCode; error: string; run: RunSnapshot | null };

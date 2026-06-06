@@ -8,6 +8,7 @@ import { killAllPtySessions, openPtySession, resizePtySession, stopPtySession, w
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 import { getConfigState } from './config.js';
 import { getRegistryState, resolveRoleLaunch } from './agents.js';
+import { clearRun, dispatchRunAction, getCurrentRun, selectIssueRun } from './run.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,6 +25,47 @@ const ptyResizeSchema = z.object({
   rows: z.number().int().min(5).max(200),
 });
 const projectSelectSchema = z.object({ path: z.string().min(1).max(4096) });
+
+const runActionSchema = z.enum([
+  'select_issue',
+  'require_spec',
+  'mark_ready',
+  'start_builder',
+  'open_pr',
+  'start_reviewers',
+  'synthesize_reviews',
+  'request_fix',
+  'push_fix',
+  'rerun_reviewers',
+  'mark_merge_ready',
+  'mark_merged',
+  'pause',
+  'resume',
+  'cancel',
+  'flag_needs_human',
+  'report_agent_failed',
+  'exceed_max_cycles',
+  'close',
+]);
+const runBlockerSchema = z.enum([
+  'pr_conflicted',
+  'tests_failed',
+  'checks_unstable',
+  'harness_missing',
+  'repo_dirty',
+]);
+const runSelectIssueSchema = z.object({
+  issueNumber: z.number().int().positive(),
+  issueTitle: z.string().min(1).max(500).optional(),
+  maxCycles: z.number().int().min(1).max(50).optional(),
+});
+const runDispatchSchema = z.object({
+  action: runActionSchema,
+  reason: z.string().max(2000).optional(),
+  blocker: runBlockerSchema.optional(),
+  branch: z.string().min(1).max(255).optional(),
+  prNumber: z.number().int().positive().optional(),
+});
 
 function parseIpcPayload<T>(schema: z.ZodType<T>, input: unknown): T | undefined {
   const parsed = schema.safeParse(input);
@@ -58,6 +100,10 @@ function selectProjectAndResetSessions(input: string) {
   const nextRoot = getSelectedProjectRoot();
 
   if (nextRoot !== previousRoot) {
+    // A run is scoped to the project it was started in (its issue/branch/PR all
+    // belong to that repo), so discard it when the operated project changes. The
+    // renderer reloads run state on `projectChanged` like it does config/GitHub.
+    clearRun();
     for (const paneId of killAllPtySessions()) {
       if (mainWindow && !mainWindow.webContents.isDestroyed()) {
         mainWindow.webContents.send(GODMODE_IPC.ptyExit, { paneId, exit: { exitCode: 0 } });
@@ -139,6 +185,38 @@ function handleGetGithub() {
   return getGithubState(getSelectedProjectRoot(), new Date().toISOString());
 }
 
+function handleGetRun() {
+  return getCurrentRun();
+}
+
+function handleSelectIssueRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(runSelectIssueSchema, input);
+  if (!payload) {
+    return { ok: false, code: 'invalid_payload', error: 'Invalid run selection payload.', run: getCurrentRun() };
+  }
+  return selectIssueRun({
+    sourceType: 'github_issue',
+    sourceId: String(payload.issueNumber),
+    issueNumber: payload.issueNumber,
+    issueTitle: payload.issueTitle,
+    maxCycles: payload.maxCycles,
+  });
+}
+
+function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(runDispatchSchema, input);
+  if (!payload) {
+    return { ok: false, code: 'invalid_payload', error: 'Invalid run action payload.', run: getCurrentRun() };
+  }
+  const { action, ...options } = payload;
+  return dispatchRunAction(action, options);
+}
+
+function handleClearRun() {
+  clearRun();
+  return getCurrentRun();
+}
+
 function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
   const payload = parseIpcPayload(ptyStartSchema, input);
   if (!payload) return undefined;
@@ -189,6 +267,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.projectSelect, handleSelectProject);
   ipcMain.handle(GODMODE_IPC.projectBrowse, handleBrowseProject);
   ipcMain.handle(GODMODE_IPC.githubGet, handleGetGithub);
+  ipcMain.handle(GODMODE_IPC.runGet, handleGetRun);
+  ipcMain.handle(GODMODE_IPC.runSelectIssue, handleSelectIssueRun);
+  ipcMain.handle(GODMODE_IPC.runDispatch, handleDispatchRun);
+  ipcMain.handle(GODMODE_IPC.runClear, handleClearRun);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);

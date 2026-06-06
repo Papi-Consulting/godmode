@@ -6,6 +6,10 @@ import type {
   GithubState,
   ProjectConfigState,
   ProjectState,
+  RunAction,
+  RunActionResult,
+  RunBlockerKind,
+  RunSnapshot,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
@@ -28,6 +32,17 @@ const api = {
   getGithub: () => ipcRenderer.invoke(GODMODE_IPC.githubGet) as Promise<GithubState>,
   getConfig: () => ipcRenderer.invoke(GODMODE_IPC.configGet) as Promise<ProjectConfigState>,
   getRegistry: () => ipcRenderer.invoke(GODMODE_IPC.registryGet) as Promise<AgentRegistryState>,
+  getRun: () => ipcRenderer.invoke(GODMODE_IPC.runGet) as Promise<RunSnapshot | null>,
+  selectIssueRun: (input: { issueNumber: number; issueTitle?: string; maxCycles?: number }) =>
+    ipcRenderer.invoke(GODMODE_IPC.runSelectIssue, input) as Promise<RunActionResult>,
+  dispatchRun: (input: {
+    action: RunAction;
+    reason?: string;
+    blocker?: RunBlockerKind;
+    branch?: string;
+    prNumber?: number;
+  }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
+  clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<RunSnapshot | null>,
   onProjectChanged: (callback: (state: ProjectState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProjectState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.projectChanged, listener);
