@@ -573,6 +573,41 @@ export async function getCommitVerification(
   return verification;
 }
 
+/** Outcome of posting a PR comment — the one mutating `gh` call in this module. */
+export type PostCommentResult =
+  | { ok: true; url: string }
+  | { ok: false; status: Exclude<GithubStatus, 'ok'>; message: string };
+
+/**
+ * Post a comment to a pull request via `gh pr comment <N> --body <body>` (issue
+ * #10). This is the **only** mutating GitHub call in GodMode — every other path
+ * is read-only — so it is isolated and explicitly named. `execFile` passes the
+ * body as a single argv element (no shell), so there is no quoting/injection
+ * surface despite the body being free-form markdown. Like the read paths it never
+ * throws: failures fold into a classified `status`/`message` so the caller can
+ * mark the reviewer session `failed` visibly instead of silently dropping the
+ * post. On success `gh` prints the new comment URL, which is returned for linking.
+ */
+export async function postPrComment(
+  projectRoot: string,
+  prNumber: number,
+  body: string,
+): Promise<PostCommentResult> {
+  const cwd = path.resolve(projectRoot);
+  try {
+    const { stdout } = await execFileAsync('gh', ['pr', 'comment', String(prNumber), '--body', body], {
+      cwd,
+      env: buildGithubEnv(),
+      timeout: COMMAND_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER,
+    });
+    return { ok: true, url: stdout.trim() };
+  } catch (error) {
+    const classified = classifyError(error);
+    return { ok: false, status: classified.status, message: classified.message };
+  }
+}
+
 /** Join a short list with commas and a trailing "and": ["a","b","c"] → "a, b, and c". */
 function formatList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? '';

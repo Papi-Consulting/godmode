@@ -19,6 +19,10 @@ import {
   recordVerification,
   selectIssueRun,
   selectManualTaskRun,
+  setReviewerSessions,
+  setCurrentRunReviewers,
+  updateReviewerSession,
+  updateCurrentRunReviewer,
 } from '../dist/main/run.js';
 
 const NOW = '2026-06-06T12:00:00.000Z';
@@ -440,5 +444,59 @@ test('recordCurrentRunVerification records against the live run, null when none'
   const second = recordCurrentRunVerification(verification({ status: 'verified' }));
   assert.equal(second.verifications.length, 2, 'history is append-only');
   assert.equal(second.verifications[1].status, 'verified');
+  clearRun();
+});
+
+// --- Reviewer session lifecycle (issue #10) ---------------------------------
+
+const reviewerDescriptors = [
+  { reviewerId: 'reviewer-a', paneId: 'reviewer_a', sessionToken: 'tok-a', displayName: 'Codex A', roleDoc: 'docs/review/a.md', status: 'launching', artifactPath: '.godmode/runs/run-10/reviewer-a.log', promptChars: 200, commentPosted: false },
+  { reviewerId: 'reviewer-b', paneId: 'reviewer_b', sessionToken: 'tok-b', displayName: 'Codex B', roleDoc: 'docs/review/b.md', status: 'launching', artifactPath: '.godmode/runs/run-10/reviewer-b.log', promptChars: 210, commentPosted: false },
+];
+
+test('setReviewerSessions stamps reviewers without mutating the input', () => {
+  const run = createRun({ issueNumber: 10, now: NOW, id: 'run-10' });
+  const updated = setReviewerSessions(run, reviewerDescriptors, NOW);
+  assert.equal(run.reviewers, undefined, 'input snapshot is not mutated');
+  assert.equal(updated.reviewers.length, 2);
+  assert.equal(updated.reviewers[0].reviewerId, 'reviewer-a');
+  assert.equal(updated.reviewers[0].status, 'launching');
+  assert.equal(updated.reviewers[0].updatedAt, NOW);
+  assert.equal(updated.updatedAt, NOW);
+});
+
+test('updateReviewerSession patches one pane immutably and leaves the other untouched', () => {
+  const run = setReviewerSessions(createRun({ issueNumber: 10, now: NOW, id: 'run-10' }), reviewerDescriptors, NOW);
+  const running = updateReviewerSession(run, 'reviewer_a', { status: 'running', pid: 4321 }, NOW);
+  assert.equal(run.reviewers[0].status, 'launching', 'input snapshot is not mutated');
+  assert.equal(running.reviewers[0].status, 'running');
+  assert.equal(running.reviewers[0].pid, 4321);
+  assert.equal(running.reviewers[1].status, 'launching', 'the other reviewer is untouched');
+
+  const posted = updateReviewerSession(running, 'reviewer_a', { status: 'comment_posted', commentPosted: true, commentUrl: 'https://gh/c/1' }, NOW);
+  assert.equal(posted.reviewers[0].status, 'comment_posted');
+  assert.equal(posted.reviewers[0].commentPosted, true);
+  assert.equal(posted.reviewers[0].commentUrl, 'https://gh/c/1');
+});
+
+test('updateReviewerSession is a no-op when the run has no tracked reviewers', () => {
+  const run = createRun({ issueNumber: 10, now: NOW, id: 'run-10' });
+  const same = updateReviewerSession(run, 'reviewer_a', { status: 'failed' }, NOW);
+  assert.equal(same, run);
+});
+
+test('reviewer controller wrappers act on the live run, null when none', () => {
+  clearRun();
+  assert.equal(setCurrentRunReviewers(reviewerDescriptors, NOW), null);
+  assert.equal(updateCurrentRunReviewer('reviewer_a', { status: 'failed' }, NOW), null);
+
+  selectIssueRun({ issueNumber: 10, issueTitle: 'Launch reviewers' });
+  const set = setCurrentRunReviewers(reviewerDescriptors, NOW);
+  assert.equal(set.reviewers.length, 2);
+
+  const failed = updateCurrentRunReviewer('reviewer_b', { status: 'failed', error: 'Launch failed: command not found' }, NOW);
+  assert.equal(failed.reviewers[1].status, 'failed');
+  assert.match(failed.reviewers[1].error, /command not found/);
+  assert.equal(getCurrentRun().reviewers[1].status, 'failed');
   clearRun();
 });

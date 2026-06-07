@@ -1389,3 +1389,65 @@ li.issue-active .feed-num,
 li.issue-active .feed-title {
   color: var(--brand-bright);
 }
+
+/* Reviewer launch + comment cockpit (issue #10). */
+.reviewer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.reviewer-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.reviewer-row.success {
+  border-left-color: var(--green, #45d18f);
+}
+
+.reviewer-row.warn {
+  border-left-color: var(--amber, #f4b740);
+}
+
+.reviewer-row.error {
+  border-left-color: var(--red);
+}
+
+.reviewer-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reviewer-artifact {
+  font-size: 0.62rem;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.reviewer-comment {
+  font-size: 0.64rem;
+  color: var(--text-soft);
+}
+
+.reviewer-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.reviewer-row-actions button {
+  padding: 1px 8px;
+  font-size: 0.62rem;
+}

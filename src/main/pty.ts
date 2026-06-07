@@ -22,6 +22,15 @@ export type OpenPtyInput = {
   projectRoot: string;
   /** Configured agent command for the role, e.g. "claude" or "node --version". */
   command: string;
+  /**
+   * Extra arguments appended after the command's own tokens at spawn time. Used
+   * to deliver a one-shot agent's prompt as a final argv element (so it is
+   * present when the process starts and reads it to completion), instead of
+   * writing it into the PTY after spawn — which a one-shot process may have
+   * already exited past. Each element becomes one argv entry (no shell), so no
+   * quoting is needed.
+   */
+  extraArgs?: string[];
   onData: (data: string) => void;
   onExit: (exit: PtyExit) => void;
 };
@@ -122,9 +131,10 @@ export function openPtySession(input: OpenPtyInput): PtyStartResult {
     sessions.delete(input.paneId);
   }
 
+  const spawnArgs = input.extraArgs ? [...args, ...input.extraArgs] : args;
   let session: pty.IPty;
   try {
-    session = pty.spawn(executable, args, {
+    session = pty.spawn(executable, spawnArgs, {
       name: 'xterm-256color',
       cols: 100,
       rows: 28,

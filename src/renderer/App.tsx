@@ -14,6 +14,7 @@ import { CommandPreviewPane } from './components/CommandPreviewPane.js';
 import { GithubPane } from './components/GithubPane.js';
 import { HandoffPane } from './components/HandoffPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
+import { ReviewLaunchPane } from './components/ReviewLaunchPane.js';
 import { RunControlPane, STATUS_LABEL, type RunDispatchOptions } from './components/RunControlPane.js';
 import { VerificationPane } from './components/VerificationPane.js';
 
@@ -73,6 +74,8 @@ export function App() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [startReviewersError, setStartReviewersError] = useState<string | null>(null);
+  const [startingReviewers, setStartingReviewers] = useState(false);
   // Monotonic id for the latest run request. Like the GitHub pane, a run fetch
   // snapshots state in main at invocation time, so a late `getRun()` for the
   // previous operated project must never repopulate stale run state. Mutations
@@ -163,6 +166,33 @@ export function App() {
     }
   }, []);
 
+  // Launch Reviewer A/B from the verified PR. Main re-runs the #9 verification
+  // gate and returns the updated snapshot (or a typed rejection, e.g. not_verified),
+  // so a refused launch surfaces why and leaves run state unchanged.
+  const startReviewers = useCallback(async () => {
+    if (!window.godmode) return;
+    setStartingReviewers(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.startReviewers();
+      if (seq !== runRequestSeq.current) return;
+      if (result.run) setRun(result.run);
+      setStartReviewersError(result.ok ? null : result.error);
+    } finally {
+      setStartingReviewers(false);
+    }
+  }, []);
+
+  // Operator override / re-post for one reviewer's marker comment.
+  const postReviewerComment = useCallback(async (paneId: 'reviewer_a' | 'reviewer_b') => {
+    if (!window.godmode) return;
+    const seq = (runRequestSeq.current += 1);
+    const result = await window.godmode.postReviewerComment({ paneId });
+    if (seq !== runRequestSeq.current) return;
+    if (result.run) setRun(result.run);
+    setStartReviewersError(result.ok ? null : result.error);
+  }, []);
+
   useEffect(() => {
     let active = true;
     void window.godmode?.getApp().then((state) => {
@@ -178,7 +208,7 @@ export function App() {
     // A run is scoped to its operated project; main discards it on project
     // change. Invalidate any in-flight fetch and clear the stale snapshot
     // immediately so the previous project's run never lingers, then re-fetch.
-    const off = window.godmode?.onProjectChanged(() => {
+    const offProject = window.godmode?.onProjectChanged(() => {
       runRequestSeq.current += 1;
       setRun(null);
       setRunError(null);
@@ -186,10 +216,20 @@ export function App() {
       // Verification is scoped to the operated project's branch/PR; drop the
       // stale result so the previous repo's evidence never lingers.
       setVerification(null);
+      setStartReviewersError(null);
       void refreshRun();
     });
+    // Main pushes the run snapshot when async reviewer lifecycle changes (a
+    // reviewer session exits, a marker comment posts/fails). Treat it as the
+    // authoritative latest state and bump the seq so an older in-flight fetch
+    // can't overwrite it.
+    const offRun = window.godmode?.onRunChanged((next) => {
+      runRequestSeq.current += 1;
+      setRun(next ?? null);
+    });
     return () => {
-      off?.();
+      offProject?.();
+      offRun?.();
     };
   }, [refreshRun]);
 
@@ -362,6 +402,13 @@ export function App() {
                 loading={verifying}
                 hasRun={run !== null}
                 onVerify={verifyCommit}
+              />
+              <ReviewLaunchPane
+                run={run}
+                startError={startReviewersError}
+                starting={startingReviewers}
+                onStart={startReviewers}
+                onPostComment={postReviewerComment}
               />
             </section>
           </section>

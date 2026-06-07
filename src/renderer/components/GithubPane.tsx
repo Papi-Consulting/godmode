@@ -228,15 +228,22 @@ export function GithubPane({
     // project changes, clear the stale snapshot immediately so the previous
     // repo's issues/PRs never linger under the new project's label, then
     // refetch for the newly selected project.
-    const off = window.godmode?.onProjectChanged(() => {
+    const offProject = window.godmode?.onProjectChanged(() => {
       // Invalidate any in-flight request for the previous project, clear the
       // stale snapshot, then refetch for the new operated project.
       requestSeq.current += 1;
       setState(null);
       void refresh();
     });
+    // After GodMode mutates the PR (e.g. posting a reviewer marker comment) the
+    // snapshot is stale. Refetch in place — same operated project, just newer
+    // data — so the GitHub pane reflects the new comment/status (issue #10).
+    const offGithub = window.godmode?.onGithubChanged(() => {
+      void refresh();
+    });
     return () => {
-      off?.();
+      offProject?.();
+      offGithub?.();
     };
   }, [refresh]);
 

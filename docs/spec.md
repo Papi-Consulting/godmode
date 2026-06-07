@@ -146,6 +146,30 @@ log, and the run advances to `builder_running`. Reaching `builder_running`
 records that the prompt was *sent*, never that the task succeeded. See
 `docs/architecture/builder-handoff.md`.
 
+### Reviewer launch and PR comments
+
+From a `pr_opened` run, `godmode:run:reviewers:start` launches Reviewer A and B
+as independent tracked sessions. It first **re-runs the commit-verification gate
+(#9) live** and refuses to launch unless the PR is `verified` — plain PR
+existence or an agent self-report is never enough evidence. Each reviewer gets a
+**pointer-first** fresh-session prompt bound to the verified PR (number/URL/branch),
+its reviewer id, and its role doc, directing it to read `AGENTS.md`, the live PR
+diff/threads/checks (`gh pr view`/`gh pr diff`), and the linked issue itself — the
+diff is never pasted. Sessions launch in the operated-project root (the configured
+reviewer panes) and their stdout/stderr is captured to a local artifact under
+`.godmode/runs/<run-id>/<reviewer-id>.log` (gitignored), linked from the run state
+and shown in the dashboard. On each reviewer's session exit GodMode auto-posts one
+concise **role-signed marker** comment via `gh pr comment` (the one mutating `gh`
+call) — a factual marker that the session ran and where its output was captured,
+explicitly *not* a merge-readiness claim, and never the agent's pasted output; the
+reviewer's own findings are its separate PR comments. A successful post refreshes
+the operated project's GitHub snapshot so the new comment shows without a manual
+refresh. An operator override re-posts or covers interactive reviewers that do not
+exit. Launch, capture, and comment failures are surfaced visibly per reviewer and
+never collapse into "complete". One-shot reviewers use the agent's non-interactive
+command (the default Codex reviewer ships `codex exec`) so they run to completion
+and auto-post. See `docs/architecture/reviewer-launch.md`.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:
@@ -185,7 +209,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [x] Builder handoff: bind selected issue/manual task to a reviewed prompt and send to the builder.
 - [x] Commit verification: prove the expected builder commit is on the remote PR before trusting builder output (`docs/architecture/commit-verification.md`).
 - [ ] Claude builder run.
-- [ ] Codex reviewer runs.
+- [x] Reviewer launch: launch Reviewer A/B from a verified PR, capture their output, and post role-signed PR comments (`docs/architecture/reviewer-launch.md`).
 - [ ] Automatic review/fix loop.
 - [ ] Dogfood GodMode on itself.
 

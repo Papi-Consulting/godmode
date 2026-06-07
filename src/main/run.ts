@@ -4,6 +4,7 @@ import type {
   RunAction,
   RunActionResult,
   RunBlockerKind,
+  ReviewerSessionState,
   RunPromptLogEntry,
   RunSnapshot,
   RunSourceDetail,
@@ -467,6 +468,73 @@ export function recordVerification(run: RunSnapshot, verification: CommitVerific
 export function recordCurrentRunVerification(verification: CommitVerification): RunSnapshot | null {
   if (!currentRun) return null;
   currentRun = recordVerification(currentRun, verification);
+  return currentRun;
+}
+
+/**
+ * Replace a run's tracked reviewer sessions, returning a new snapshot (the input
+ * is never mutated, matching {@link applyAction}). Called when `start_reviewers`
+ * launches the configured reviewers (issue #10): each descriptor is stamped with
+ * the supplied timestamp so the dashboard can show independent reviewer state.
+ */
+export function setReviewerSessions(
+  run: RunSnapshot,
+  sessions: Omit<ReviewerSessionState, 'updatedAt'>[],
+  now?: string,
+): RunSnapshot {
+  const at = now ?? new Date().toISOString();
+  const reviewers = sessions.map((session) => ({ ...session, updatedAt: at }));
+  return { ...run, reviewers, updatedAt: at };
+}
+
+/** Fields of a tracked reviewer session that a lifecycle update may patch. */
+export type ReviewerSessionPatch = Partial<Omit<ReviewerSessionState, 'reviewerId' | 'paneId' | 'updatedAt'>>;
+
+/**
+ * Patch one reviewer session (matched by pane) on a run, returning a new snapshot
+ * (the input is never mutated). Used as the reviewer lifecycle advances —
+ * running → completed → comment_posted, or failed — so a later state is recorded
+ * without losing the rest of the session's tracked detail. A pane with no tracked
+ * session is left untouched.
+ */
+export function updateReviewerSession(
+  run: RunSnapshot,
+  paneId: AgentRole,
+  patch: ReviewerSessionPatch,
+  now?: string,
+): RunSnapshot {
+  if (!run.reviewers) return run;
+  const at = now ?? new Date().toISOString();
+  const reviewers = run.reviewers.map((session) =>
+    session.paneId === paneId ? { ...session, ...patch, updatedAt: at } : session,
+  );
+  return { ...run, reviewers, updatedAt: at };
+}
+
+/**
+ * Set the current run's reviewer sessions (controller wrapper). Returns the
+ * updated snapshot, or null when there is no active run.
+ */
+export function setCurrentRunReviewers(
+  sessions: Omit<ReviewerSessionState, 'updatedAt'>[],
+  now?: string,
+): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = setReviewerSessions(currentRun, sessions, now);
+  return currentRun;
+}
+
+/**
+ * Patch one reviewer session on the current run (controller wrapper). Returns the
+ * updated snapshot, or null when there is no active run.
+ */
+export function updateCurrentRunReviewer(
+  paneId: AgentRole,
+  patch: ReviewerSessionPatch,
+  now?: string,
+): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = updateReviewerSession(currentRun, paneId, patch, now);
   return currentRun;
 }
 

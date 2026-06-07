@@ -29,7 +29,13 @@ const roleEntrySchema = z.object({
 const headSchema = roleEntrySchema.extend({ pane: z.literal('head') });
 const builderSchema = roleEntrySchema.extend({ pane: z.literal('builder') });
 const reviewerSchema = roleEntrySchema.extend({
-  id: z.string().min(1),
+  // A slug: reviewer ids are used as path segments for run artifacts
+  // (`.godmode/runs/<run-id>/<id>.log`) and as PR-comment signatures, so they
+  // must not contain path separators or `..` that could escape the run dir.
+  id: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z0-9_-]+$/, 'reviewer id must be a slug ([A-Za-z0-9_-]) with no path separators'),
   pane: z.enum(['reviewer_a', 'reviewer_b']),
 });
 
@@ -132,8 +138,13 @@ export const DEFAULT_CONFIG: GodmodeConfig = {
     hermes: { adapter: 'cli', command: 'hermes', mode: 'interactive' },
     'claude-code': { adapter: 'cli', command: 'claude', mode: 'interactive' },
     codex: {
+      // `codex exec <prompt>` is Codex's non-interactive path that runs a prompt
+      // to completion and exits; plain `codex <prompt>` opens the interactive CLI
+      // and never returns, which would leave a one-shot reviewer stuck `running`
+      // and never auto-post. The harness stays vendor-agnostic — this exec
+      // invocation lives in config (default + per-project), not in core code.
       adapter: 'cli',
-      command: 'codex',
+      command: 'codex exec',
       mode: 'oneshot',
       capabilities: { canEditFiles: false, canOpenPr: false },
     },

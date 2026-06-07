@@ -654,6 +654,14 @@ export type RunSnapshot = {
   prompts: RunPromptLogEntry[];
   /** Append-only history of commit-verification checks against this run (#9). */
   verifications: RunVerificationLogEntry[];
+  /**
+   * Tracked reviewer sessions launched for this run's PR (issue #10), one per
+   * configured reviewer. Present once `start_reviewers` has launched them; each
+   * entry carries its own lifecycle (launch → run → complete → comment) so the
+   * dashboard can show independent reviewer state and a failure never silently
+   * reads as complete.
+   */
+  reviewers?: ReviewerSessionState[];
   createdAt: string;
   updatedAt: string;
 };
@@ -737,3 +745,160 @@ export type RunVerificationResult = {
   verification: CommitVerification;
   run: RunSnapshot | null;
 };
+
+/**
+ * Lifecycle of a single tracked reviewer session (issue #10).
+ * - `idle`: configured but not yet launched.
+ * - `launching`: a launch was attempted (artifact dir prepared, PTY opening).
+ * - `running`: the reviewer session is live and its output is being captured.
+ * - `completed`: the session exited (e.g. a oneshot reviewer finished) — its
+ *   output is captured, but GodMode has not yet posted its marker comment.
+ * - `comment_posted`: GodMode posted its role-signed marker PR comment.
+ * - `failed`: launch, capture, or comment posting failed; surfaced visibly and
+ *   never collapsed into `completed` so review is never silently marked done.
+ */
+export type ReviewerSessionStatus =
+  | 'idle'
+  | 'launching'
+  | 'running'
+  | 'completed'
+  | 'comment_posted'
+  | 'failed';
+
+/**
+ * Tracked state of one reviewer session bound to a run's PR. Serializable like
+ * the rest of {@link RunSnapshot} so it can later persist to `.godmode/runs/`.
+ * Vendor names only ever appear in {@link displayName}; the pane/reviewer keys
+ * stay generic.
+ */
+export type ReviewerSessionState = {
+  /** Reviewer slug, e.g. "reviewer-a". */
+  reviewerId: string;
+  /** PTY pane/role the reviewer runs in. */
+  paneId: AgentRole;
+  /**
+   * Opaque per-launch identity, regenerated every time reviewers are launched
+   * (including an idempotent same-run relaunch). An async marker post captures
+   * this before its `gh` call and re-confirms it after; if a relaunch replaced
+   * the session under the same pane/run/root, the token differs and the stale
+   * post is refused — it can never patch the freshly relaunched session.
+   */
+  sessionToken: string;
+  /** Resolved reviewer display name (vendor label only; role stays generic). */
+  displayName: string;
+  /** Project-relative role doc the reviewer was pointed at, when configured. */
+  roleDoc?: string;
+  status: ReviewerSessionStatus;
+  /** Local run-artifact path the reviewer's output is captured to. */
+  artifactPath?: string;
+  /** Character length of the prompt written into the reviewer session. */
+  promptChars?: number;
+  /** Live PID once the session is running. */
+  pid?: number;
+  /** Exit code once the session has exited. */
+  exitCode?: number;
+  /** True once GodMode's role-signed marker comment has been posted. */
+  commentPosted: boolean;
+  /** URL of the posted marker comment, when `gh` reported one. */
+  commentUrl?: string;
+  /**
+   * Visible reason for a `failed` status: a terminal *session* failure (launch
+   * failure, output-capture failure, or non-zero exit). Distinct from
+   * {@link commentError} so a session failure can never be cleared by a later
+   * marker post — a failed reviewer never collapses into a success state.
+   */
+  error?: string;
+  /**
+   * Visible reason a marker *comment post* failed (or was refused), kept separate
+   * from {@link error} so it stays retryable via the operator override without
+   * masking — or being masked by — the session's own outcome.
+   */
+  commentError?: string;
+  /** ISO timestamp this session state last changed. */
+  updatedAt: string;
+};
+
+/**
+ * The exact prompt GodMode would write into one reviewer session, bound to the
+ * run's verified PR (issue #10). Deliberately **pointer-first**: the reviewer is
+ * directed to read the operated project's canonical sources and the live PR
+ * diff/threads/checks itself, rather than having them pasted in. Mirrors
+ * {@link BuilderHandoff} (issue #8).
+ */
+export type ReviewerHandoff = {
+  reviewerId: string;
+  paneId: AgentRole;
+  /** Resolved reviewer display name (vendor label only; role stays generic). */
+  displayName: string;
+  agentId: string;
+  adapter: AgentAdapter;
+  /** How the prompt would reach the reviewer, derived from the agent's mode. */
+  delivery: 'interactive' | 'oneshot';
+  /** Project-relative role doc the reviewer must read first, when configured. */
+  roleDoc?: string;
+  /** Auditable command line for the bound reviewer agent. */
+  commandLine: string;
+  /** The fully composed pointer-first prompt for this reviewer. */
+  prompt: string;
+  /** Template variables left unbound; a non-empty list blocks launch. */
+  missingVariables: string[];
+};
+
+/**
+ * The reviewer launch plan for the current run: the bound PR coordinates, every
+ * configured reviewer's pointer-first prompt, and whether launch is allowed.
+ * Producing it never launches anything — it is the auditable artifact behind the
+ * dashboard's reviewer pane. Launch is gated on a real bound PR **and** the run's
+ * latest commit-verification being `verified` (ties #10 to the #9 evidence gate),
+ * so plain PR existence or an agent self-report is never enough.
+ */
+export type ReviewerLaunchPlan = {
+  /** True when no real run/PR backs this plan (mock/demo preview). */
+  isMock: boolean;
+  prNumber?: number;
+  prUrl?: string;
+  branch?: string;
+  reviewers: ReviewerHandoff[];
+  /** True only when a verified PR is bound and every prompt is fully resolved. */
+  canStart: boolean;
+  /** Why launch is blocked, for the UI to surface when `canStart` is false. */
+  blockedReason?: string;
+};
+
+/** Why starting reviewers / posting a reviewer comment was rejected. */
+export type ReviewerRejectionCode =
+  | 'no_run'
+  | 'invalid_state'
+  | 'not_verified'
+  | 'not_startable'
+  | 'no_reviewers_configured'
+  | 'unknown_reviewer'
+  | 'no_pr'
+  | 'comment_failed';
+
+/**
+ * Result of launching the reviewer sessions for a run (issue #10). On success the
+ * updated run snapshot (now `reviewers_running`, with per-reviewer sessions
+ * tracked) is returned; on failure nothing was launched and `run` is the
+ * unchanged snapshot. The commit-verification run as the launch gate is returned
+ * so the UI can explain a `not_verified` rejection with the live evidence.
+ */
+export type StartReviewersResult =
+  | { ok: true; run: RunSnapshot; verification: CommitVerification }
+  | {
+      ok: false;
+      code: ReviewerRejectionCode;
+      error: string;
+      run: RunSnapshot | null;
+      verification?: CommitVerification;
+    };
+
+/**
+ * Result of posting one reviewer's role-signed marker comment (auto on session
+ * exit, or via the operator override). On success the updated run snapshot (the
+ * reviewer now `comment_posted`) is returned; on failure the reviewer is marked
+ * `failed` with a visible reason and `run` carries that recorded failure.
+ */
+export type ReviewerCommentResult =
+  | { ok: true; run: RunSnapshot; commentUrl?: string }
+  | { ok: false; code: ReviewerRejectionCode; error: string; run: RunSnapshot | null };

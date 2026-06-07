@@ -9,7 +9,8 @@
     "dev": "vite --host 127.0.0.1",
     "electron:dev": "npm run build:main && concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 NODE_ENV=development electron .\"",
     "build": "npm run typecheck && npm run build:main && vite build",
-    "build:main": "tsc -p tsconfig.main.json",
+    "build:main": "tsc -p tsconfig.main.json && npm run build:preload",
+    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --outfile=dist/preload/index.cjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
     "test": "npm run build:main && node --test"
   },
@@ -31,6 +32,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.2.1",
     "electron": "^39.2.7",
+    "esbuild": "^0.27.7",
     "typescript": "^5.9.3",
     "vite": "^7.2.6",
     "wait-on": "^9.0.3"

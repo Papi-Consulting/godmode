@@ -9,11 +9,13 @@ import type {
   HandoffSendResult,
   ProjectConfigState,
   ProjectState,
+  ReviewerCommentResult,
   RunAction,
   RunActionResult,
   RunBlockerKind,
   RunSnapshot,
   RunVerificationResult,
+  StartReviewersResult,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
@@ -46,6 +48,9 @@ const api = {
   getHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffGet) as Promise<BuilderHandoff>,
   sendHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffSend) as Promise<HandoffSendResult>,
   verifyCommit: () => ipcRenderer.invoke(GODMODE_IPC.runVerify) as Promise<RunVerificationResult>,
+  startReviewers: () => ipcRenderer.invoke(GODMODE_IPC.runStartReviewers) as Promise<StartReviewersResult>,
+  postReviewerComment: (input: { paneId: 'reviewer_a' | 'reviewer_b' }) =>
+    ipcRenderer.invoke(GODMODE_IPC.runReviewerComment, input) as Promise<ReviewerCommentResult>,
   dispatchRun: (input: {
     action: RunAction;
     reason?: string;
@@ -59,6 +64,16 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProjectState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.projectChanged, listener);
     return () => ipcRenderer.off(GODMODE_IPC.projectChanged, listener);
+  },
+  onRunChanged: (callback: (run: RunSnapshot | null) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: RunSnapshot | null) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runChanged, listener);
+  },
+  onGithubChanged: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(GODMODE_IPC.githubChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.githubChanged, listener);
   },
   startPty: (input: { paneId: string }) =>
     ipcRenderer.invoke(GODMODE_IPC.ptyStart, input) as Promise<PtyStartResult | undefined>,
