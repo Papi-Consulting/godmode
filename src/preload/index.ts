@@ -9,6 +9,7 @@ import type {
   HandoffSendResult,
   ProjectConfigState,
   ProjectState,
+  ReviewSynthesisResult,
   ReviewerCommentResult,
   RunAction,
   RunActionResult,
@@ -51,6 +52,8 @@ const api = {
   startReviewers: () => ipcRenderer.invoke(GODMODE_IPC.runStartReviewers) as Promise<StartReviewersResult>,
   postReviewerComment: (input: { paneId: 'reviewer_a' | 'reviewer_b' }) =>
     ipcRenderer.invoke(GODMODE_IPC.runReviewerComment, input) as Promise<ReviewerCommentResult>,
+  synthesizeReviews: () => ipcRenderer.invoke(GODMODE_IPC.runSynthesizeReviews) as Promise<ReviewSynthesisResult>,
+  sendFix: () => ipcRenderer.invoke(GODMODE_IPC.runSendFix) as Promise<HandoffSendResult>,
   dispatchRun: (input: {
     action: RunAction;
     reason?: string;

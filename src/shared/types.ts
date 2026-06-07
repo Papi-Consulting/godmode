@@ -662,6 +662,14 @@ export type RunSnapshot = {
    * reads as complete.
    */
   reviewers?: ReviewerSessionState[];
+  /**
+   * Parsed reviewer findings + merge-gate decision from the most recent review
+   * synthesis (issue #11). Present once `synthesize_reviews` has parsed the
+   * reviewer sessions' captured output for this run. Stored on the run for the
+   * dashboard and mirrored to `.godmode/runs/<run-id>/findings.json`. Self-reports
+   * are advisory: the merge gate still requires the verified #9 evidence.
+   */
+  findings?: RunFindings;
   createdAt: string;
   updatedAt: string;
 };
@@ -902,3 +910,185 @@ export type StartReviewersResult =
 export type ReviewerCommentResult =
   | { ok: true; run: RunSnapshot; commentUrl?: string }
   | { ok: false; code: ReviewerRejectionCode; error: string; run: RunSnapshot | null };
+
+// --- Reviewer findings, merge gate, and the first fix cycle (issue #11) -------
+
+/**
+ * Severity of a normalized reviewer finding.
+ * - `blocking`: must be addressed before merge (a `BLOCKING A-n`/`B-n` block, or
+ *   a reviewer `fail` marker). Only blocking findings gate merge in v1.
+ * - `non_blocking`: a finding the reviewer raised without blocking on it.
+ * - `note`: an informational remark.
+ */
+export type FindingSeverity = 'blocking' | 'non_blocking' | 'note';
+
+/**
+ * Lifecycle of a normalized finding through the first fix cycle.
+ * - `open`: parsed but not yet acted on.
+ * - `accepted`: GodMode is driving a fix for it. In this first slice, every
+ *   cleanly-parsed blocking finding is accepted by default.
+ * - `fixed`: addressed by a verified fix push (reserved for later cycles).
+ * - `needs_human`: ambiguous/contradictory; a person must decide.
+ */
+export type FindingStatus = 'open' | 'accepted' | 'fixed' | 'needs_human';
+
+/**
+ * One normalized reviewer finding, parsed from a reviewer session's captured
+ * output. Reviewer/role keys stay generic; the parsed `marker` (e.g. `A-1`) is
+ * the reviewer's own label, retained so the dashboard and fix prompt can name it.
+ */
+export type ReviewerFinding = {
+  /** Reviewer slug that raised it, e.g. "reviewer-a". */
+  reviewerId: string;
+  /** PTY pane/role of the reviewer, e.g. "reviewer_a". */
+  paneId: AgentRole;
+  /** The reviewer's own block label when present, e.g. "A-1". */
+  marker?: string;
+  severity: FindingSeverity;
+  status: FindingStatus;
+  /** Project-relative file path the finding points at, when parsed. */
+  file?: string;
+  /** 1-based line number within {@link file}, when parsed. */
+  line?: number;
+  title: string;
+  /** The "Issue:" body / why-it-blocks text, when present. */
+  details?: string;
+  /** The reviewer's suggested fix, when present. */
+  suggestedFix?: string;
+};
+
+/**
+ * Parsed outcome of a single reviewer's captured output.
+ * - `pass`: the reviewer cleanly passed (a `pass` marker or a PASS line, with no
+ *   blocking findings).
+ * - `fail`: the reviewer cleanly failed with at least one visible blocking finding.
+ * - `ambiguous`: missing, malformed, contradictory, or internally inconsistent
+ *   output — routed to `needs_human`, never treated as a pass.
+ */
+export type ReviewerResultStatus = 'pass' | 'fail' | 'ambiguous';
+
+/**
+ * The normalized result of parsing one reviewer session's captured output
+ * (issue #11). Agent self-reports are advisory: this drives blocker surfacing and
+ * the fix loop, but the merge gate still requires the verified #9 evidence.
+ */
+export type ReviewerResult = {
+  reviewerId: string;
+  paneId: AgentRole;
+  status: ReviewerResultStatus;
+  /** Status declared by a `DONE: ROLE=reviewer STATUS=…` marker, when present. */
+  declaredStatus?: 'pass' | 'fail';
+  /** Blocking count declared by the `DONE` marker, when present. */
+  declaredBlocking?: number;
+  /** Normalized blocking/non-blocking findings parsed from the output. */
+  findings: ReviewerFinding[];
+  /**
+   * Human-readable notes explaining why a result is `ambiguous` (or any
+   * discrepancy between the declared marker and the parsed findings), surfaced so
+   * the operator sees *why* a reviewer routed to needs-human.
+   */
+  notes: string[];
+};
+
+/**
+ * Whether one reviewer clears its half of the merge gate, with the reason.
+ * A reviewer clears when it passed (or raised zero accepted blocking findings)
+ * and its output was not ambiguous.
+ */
+export type ReviewerGateState = {
+  reviewerId: string;
+  paneId: AgentRole;
+  status: ReviewerResultStatus;
+  cleared: boolean;
+  /** Count of accepted blocking findings for this reviewer. */
+  acceptedBlockers: number;
+};
+
+/**
+ * What the review synthesis recommends the run do next:
+ * - `merge_ready`: both reviewers cleared and the #9 evidence is verified.
+ * - `request_fix`: accepted blockers remain on a VERIFIED PR and the cycle budget
+ *   has room — a fix cycle only ever targets verified PR coordinates.
+ * - `needs_human`: ambiguous/contradictory reviewer output, or blockers with no
+ *   cycle budget left.
+ * - `hold`: a non-reviewer gate is not yet met and nothing can auto-fire — either
+ *   no blockers but the PR is unverified, OR blockers exist but the PR is
+ *   unverified (held until the operator re-verifies, then it becomes request_fix).
+ */
+export type MergeRecommendation = 'merge_ready' | 'request_fix' | 'needs_human' | 'hold';
+
+/**
+ * The computed merge-readiness gate for a run (issue #11). Merge-ready requires
+ * BOTH reviewers cleared AND the verified #9 commit evidence AND no accepted
+ * blockers remaining — a reviewer self-report alone is never enough. Every
+ * unmet condition is listed in {@link reasons} so the dashboard explains the gate.
+ */
+export type MergeReadiness = {
+  /** True only when every gate below is satisfied. */
+  mergeReady: boolean;
+  reviewerA: ReviewerGateState | null;
+  reviewerB: ReviewerGateState | null;
+  /** True when the latest #9 verification status is `verified`. */
+  prVerified: boolean;
+  /** True when no accepted blocking findings remain across reviewers. */
+  noAcceptedBlockers: boolean;
+  /** True when any reviewer result was ambiguous (forces needs-human). */
+  anyAmbiguous: boolean;
+  recommendation: MergeRecommendation;
+  /** Human-readable, ordered list of why merge is (not) ready. */
+  reasons: string[];
+};
+
+/**
+ * The parsed-findings + merge-gate document for a run, stored on the run snapshot
+ * and mirrored to `.godmode/runs/<run-id>/findings.json` (issue #11). Carries the
+ * cycle it was produced in so a later re-review can be told apart from the first.
+ */
+export type RunFindings = {
+  runId: string;
+  /** Fix-loop cycle this synthesis was produced in. */
+  cycle: number;
+  results: ReviewerResult[];
+  merge: MergeReadiness;
+  /** Accepted blocking findings, flattened across reviewers, for the fix prompt. */
+  acceptedBlockers: ReviewerFinding[];
+  /**
+   * PR URL of the verified PR this synthesis was computed against, bound here so
+   * the fix handoff can be (re)composed without another `gh` round-trip.
+   */
+  prUrl?: string;
+  /** ISO timestamp the synthesis was produced (main owns the clock). */
+  fetchedAt: string;
+};
+
+/** Why a review synthesis was rejected, so the UI can explain precisely. */
+export type ReviewSynthesisRejectionCode =
+  | 'no_run'
+  | 'invalid_state'
+  | 'no_reviewers'
+  | 'no_findings';
+
+/**
+ * Result of synthesizing the reviewer sessions for a run (issue #11): parse each
+ * reviewer's captured output, re-run the #9 evidence gate, compute the merge gate,
+ * persist the findings, and drive the run to the recommended next state. On
+ * success the updated run snapshot is returned with the parsed findings and the
+ * verification used as the gate; a fix handoff is included when the run advanced
+ * to `builder_fixing` so the operator can review and send it.
+ */
+export type ReviewSynthesisResult =
+  | {
+      ok: true;
+      run: RunSnapshot;
+      findings: RunFindings;
+      verification: CommitVerification;
+      /** Rendered fix handoff, present only when the run advanced to builder_fixing. */
+      fixHandoff?: BuilderHandoff;
+    }
+  | {
+      ok: false;
+      code: ReviewSynthesisRejectionCode;
+      error: string;
+      run: RunSnapshot | null;
+      verification?: CommitVerification;
+    };

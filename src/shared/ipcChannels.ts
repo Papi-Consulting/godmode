@@ -24,6 +24,8 @@ export const GODMODE_IPC = {
   runVerify: 'godmode:run:verify',
   runStartReviewers: 'godmode:run:reviewers:start',
   runReviewerComment: 'godmode:run:reviewers:comment',
+  runSynthesizeReviews: 'godmode:run:reviews:synthesize',
+  runSendFix: 'godmode:run:fix:send',
   runChanged: 'godmode:run:changed',
   ptyStart: 'godmode:pty:start',
   ptyWrite: 'godmode:pty:write',

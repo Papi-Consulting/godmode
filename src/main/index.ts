@@ -24,16 +24,25 @@ import {
   recordCurrentRunVerification,
   selectIssueRun,
   selectManualTaskRun,
+  setCurrentRunFindings,
   setCurrentRunReviewers,
   updateCurrentRunReviewer,
 } from './run.js';
-import { getCurrentHandoff, promptDigest } from './handoff.js';
+import { composeFixHandoff, getCurrentHandoff, promptDigest } from './handoff.js';
 import {
   appendArtifact,
   ensureRunArtifactDir,
+  readReviewerArtifact,
   reviewerArtifactPath,
   reviewerArtifactRelPath,
+  writeRunFindings,
 } from './artifacts.js';
+import {
+  acceptedBlockers,
+  computeMergeReadiness,
+  parseReviewerOutput,
+  renderBlockersText,
+} from './findings.js';
 import {
   canPostReviewerMarker,
   composeReviewerLaunch,
@@ -45,8 +54,12 @@ import {
 } from './reviewer.js';
 import type {
   AgentRole,
+  BuilderHandoff,
   HandoffSendResult,
+  ReviewSynthesisResult,
   ReviewerCommentResult,
+  ReviewerResult,
+  RunFindings,
   RunSnapshot,
   RunSourceDetail,
   RunVerificationResult,
@@ -776,6 +789,227 @@ function handlePostReviewerComment(
   return postReviewerCommentAndRecord(payload.paneId);
 }
 
+/** Statuses a review synthesis can run from (reviewers have run for this cycle). */
+const SYNTHESIZE_STATUSES = new Set(['reviewers_running', 'reviewers_rerunning']);
+
+/**
+ * Parse each tracked reviewer's captured output into a normalized result. A
+ * reviewer whose artifact is absent/unreadable (e.g. a launch failure) parses to
+ * an ambiguous "no output captured" result rather than being skipped, so it can
+ * never silently clear the merge gate.
+ */
+function parseReviewerResults(run: RunSnapshot, projectRoot: string): ReviewerResult[] {
+  const reviewers = run.reviewers ?? [];
+  return reviewers.map((session) =>
+    parseReviewerOutput({
+      reviewerId: session.reviewerId,
+      paneId: session.paneId,
+      text: readReviewerArtifact(projectRoot, run.id, session.reviewerId) ?? '',
+    }),
+  );
+}
+
+/**
+ * Synthesize the reviewer sessions for the current run and drive the first
+ * verified fix cycle (issue #11). Order of operations:
+ *  1. Re-run the #9 commit-verification gate live and record it — a reviewer
+ *     self-report is never enough to mark merge-ready.
+ *  2. Parse each reviewer's captured output into normalized findings.
+ *  3. Compute the merge gate from the parsed results AND the verified evidence.
+ *  4. Persist the findings on the run and to `.godmode/runs/<run-id>/findings.json`.
+ *  5. Advance to `review_synthesis`, then route by the recommendation:
+ *     - `merge_ready`: mark merge-ready (only reachable with verified evidence);
+ *     - `request_fix`: open a fix cycle (or `max_cycles_exceeded` when the budget
+ *       is spent) and render the pointer-first fix handoff with normalized blockers;
+ *     - `needs_human`: flag for a human (ambiguous/contradictory output);
+ *     - `hold`: stay in synthesis (a non-reviewer gate, e.g. an unverified PR).
+ */
+async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to synthesize reviews for.', run: null };
+  }
+  if (!SYNTHESIZE_STATUSES.has(run.status)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `Reviews are synthesized from a reviewers-running run (current: ${run.status}).`,
+      run,
+    };
+  }
+  if (!run.reviewers || run.reviewers.length === 0) {
+    return { ok: false, code: 'no_reviewers', error: 'No reviewer sessions are tracked for this run.', run };
+  }
+
+  const captured = { runId: run.id, root: getSelectedProjectRoot() };
+  const projectRoot = captured.root;
+  const now = new Date().toISOString();
+
+  // #9 evidence gate: re-verify live and record it. The merge gate consumes this
+  // verified status, not plain PR existence or an agent self-report.
+  const verification = await getCommitVerification(projectRoot, { expectedCommit: run.expectedCommit }, now);
+
+  // Stale guard: the operator may have switched project or cleared/replaced the
+  // run during the await. Re-confirm the same run and root before any mutation.
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The run or operated project changed during verification; reviews were not synthesized.',
+      run: getCurrentRun(),
+      verification,
+    };
+  }
+
+  let updated = recordCurrentRunVerification(verification) ?? run;
+
+  const results = parseReviewerResults(updated, projectRoot);
+  const merge = computeMergeReadiness({ results, verification });
+  const blockers = acceptedBlockers(results);
+  const findings: RunFindings = {
+    runId: updated.id,
+    cycle: updated.cycle,
+    results,
+    merge,
+    acceptedBlockers: blockers,
+    prUrl: verification.pr?.url,
+    fetchedAt: now,
+  };
+  // Mirror to disk (best-effort) and attach to the run for the dashboard.
+  writeRunFindings(projectRoot, updated.id, findings);
+  updated = setCurrentRunFindings(findings, now) ?? updated;
+
+  // Advance reviewers_running/reviewers_rerunning → review_synthesis.
+  const synthReason = `Synthesized ${results.length} reviewer result(s): ${merge.recommendation}.`;
+  const synthesized = dispatchRunAction('synthesize_reviews', { reason: synthReason });
+  if (synthesized.ok) updated = synthesized.run;
+
+  let fixHandoff: BuilderHandoff | undefined;
+
+  if (merge.recommendation === 'merge_ready') {
+    const marked = dispatchRunAction('mark_merge_ready', {
+      reason: 'Both reviewers cleared and the PR commit is verified.',
+    });
+    if (marked.ok) updated = marked.run;
+  } else if (merge.recommendation === 'request_fix') {
+    if (updated.cycle >= updated.maxCycles) {
+      // Budget spent: the state machine forbids another fix cycle. Route to the
+      // authoritative terminal-ish state rather than re-requesting a fix.
+      const exceeded = dispatchRunAction('exceed_max_cycles', {
+        reason: `Fix-cycle budget reached (${updated.cycle}/${updated.maxCycles}) with ${blockers.length} accepted blocker(s) remaining.`,
+      });
+      if (exceeded.ok) updated = exceeded.run;
+    } else {
+      const requested = dispatchRunAction('request_fix', {
+        reason: `${blockers.length} accepted blocker(s) require a fix cycle.`,
+      });
+      if (requested.ok) {
+        updated = requested.run;
+        // Render the pointer-first fix handoff with normalized blocker text. Not
+        // sent here — the operator reviews it, then sends via runSendFix.
+        const loaded = loadConfig();
+        const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
+        const pr = verification.pr
+          ? { number: verification.pr.number, url: verification.pr.url, branch: verification.pr.headRefName }
+          : undefined;
+        fixHandoff = composeFixHandoff(config, updated, {
+          projectName: loaded.projectName,
+          pr,
+          blockersText: renderBlockersText(blockers),
+          blockerCount: blockers.length,
+        });
+      }
+    }
+  } else if (merge.recommendation === 'needs_human') {
+    const flagged = dispatchRunAction('flag_needs_human', {
+      reason: `Reviewer output is ambiguous or contradictory: ${merge.reasons.join(' ')}`,
+    });
+    if (flagged.ok) updated = flagged.run;
+  }
+  // `hold`: leave the run in review_synthesis; the dashboard shows the unmet gate.
+
+  updated = getCurrentRun() ?? updated;
+  emitRunChanged(updated);
+  return { ok: true, run: updated, findings, verification, fixHandoff };
+}
+
+/**
+ * Send the rendered builder-fix handoff into the live builder session (issue #11).
+ * Recomposes the fix prompt deterministically from the run's recorded findings —
+ * the accepted blockers and the PR coordinates bound at synthesis time — so
+ * `{{blockers}}` is never unresolved, writes it into the builder PTY, and records
+ * the prompt send. No `gh` round-trip is needed: the #9 gate already ran to OPEN
+ * this fix cycle, and the pushed commit is re-verified later before reviewers
+ * re-review. The run stays in `builder_fixing`: sending records that the fix prompt
+ * was *delivered*, never that the fix succeeded — the operator dispatches
+ * `push_fix` after the builder pushes.
+ */
+function handleSendFix(): HandoffSendResult {
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to send a fix for.', run: null };
+  }
+  if (run.status !== 'builder_fixing') {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `A fix handoff sends from a builder-fixing run (current: ${run.status}).`,
+      run,
+    };
+  }
+  const blockers = run.findings?.acceptedBlockers ?? [];
+  if (blockers.length === 0) {
+    return { ok: false, code: 'not_sendable', error: 'No accepted blockers are recorded to fix.', run };
+  }
+  if (run.prNumber === undefined) {
+    return { ok: false, code: 'invalid_state', error: 'No PR number is recorded for this run.', run };
+  }
+  // Verified-PR gate (defense in depth). The synthesis that opened this cycle only
+  // recommends request_fix against a verified PR, but re-confirm here: the recorded
+  // findings must carry a verified merge gate AND the bound PR URL. Sending a fix
+  // against a stale/unverified PR target would break the verified-coordinates
+  // safety contract — re-verify (#9) and re-synthesize before sending.
+  if (!run.findings?.merge.prVerified || !run.findings.prUrl) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The PR is not verified for this run; re-verify (#9) and re-synthesize before sending a fix.',
+      run,
+    };
+  }
+  if (!hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'no_builder_session',
+      error: 'No live builder session. Start the builder pane first, then send the fix.',
+      run,
+    };
+  }
+
+  const loaded = loadConfig();
+  const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
+  const pr = { number: run.prNumber, url: run.findings.prUrl, branch: run.branch };
+  const handoff = composeFixHandoff(config, run, {
+    projectName: loaded.projectName,
+    pr,
+    blockersText: renderBlockersText(blockers),
+    blockerCount: blockers.length,
+  });
+  if (!handoff.canSend) {
+    return { ok: false, code: 'not_sendable', error: handoff.blockedReason ?? 'The fix handoff is not ready to send.', run };
+  }
+
+  writeToPtySession('builder', `${handoff.prompt}\r`);
+  const updated =
+    recordCurrentRunPrompt({
+      role: 'builder',
+      digest: promptDigest(handoff.prompt),
+      promptChars: handoff.prompt.length,
+    }) ?? run;
+  emitRunChanged(updated);
+  return { ok: true, run: updated };
+}
+
 function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) {
   const payload = parseIpcPayload(runDispatchSchema, input);
   if (!payload) {
@@ -851,6 +1085,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);
   ipcMain.handle(GODMODE_IPC.runStartReviewers, handleStartReviewers);
   ipcMain.handle(GODMODE_IPC.runReviewerComment, handlePostReviewerComment);
+  ipcMain.handle(GODMODE_IPC.runSynthesizeReviews, handleSynthesizeReviews);
+  ipcMain.handle(GODMODE_IPC.runSendFix, handleSendFix);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);

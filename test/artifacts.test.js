@@ -9,10 +9,14 @@ import { test } from 'node:test';
 import {
   appendArtifact,
   ensureRunArtifactDir,
+  readReviewerArtifact,
   reviewerArtifactPath,
   reviewerArtifactRelPath,
   runArtifactRelDir,
+  runFindingsPath,
+  runFindingsRelPath,
   safeArtifactSegment,
+  writeRunFindings,
 } from '../dist/main/artifacts.js';
 
 function tempRoot() {
@@ -75,4 +79,30 @@ test('appendArtifact reports failure (not a throw) when the target dir is missin
   });
   assert.equal(ok, false);
   assert.ok(!fs.existsSync(file));
+});
+
+// --- Findings persistence (issue #11) ----------------------------------------
+
+test('readReviewerArtifact returns captured text, or null when absent', () => {
+  const root = tempRoot();
+  ensureRunArtifactDir(root, 'run-11');
+  appendArtifact(reviewerArtifactPath(root, 'run-11', 'reviewer-a'), 'DONE: ROLE=reviewer STATUS=pass BLOCKING=0\n');
+  assert.match(readReviewerArtifact(root, 'run-11', 'reviewer-a'), /STATUS=pass/);
+  // An absent artifact (e.g. a launch failure) reads as null, not a throw — the
+  // caller parses it to an ambiguous result rather than crashing synthesis.
+  assert.equal(readReviewerArtifact(root, 'run-11', 'reviewer-b'), null);
+});
+
+test('runFindingsRelPath/runFindingsPath point at the gitignored findings doc', () => {
+  assert.equal(runFindingsRelPath('run-11'), '.godmode/runs/run-11/findings.json');
+  const root = tempRoot();
+  assert.equal(runFindingsPath(root, 'run-11'), path.resolve(root, '.godmode', 'runs', 'run-11', 'findings.json'));
+});
+
+test('writeRunFindings persists a round-trippable findings doc under the run dir', () => {
+  const root = tempRoot();
+  const doc = { runId: 'run-11', cycle: 1, results: [], merge: { mergeReady: false }, acceptedBlockers: [], fetchedAt: 'now' };
+  assert.equal(writeRunFindings(root, 'run-11', doc), true);
+  const written = JSON.parse(fs.readFileSync(runFindingsPath(root, 'run-11'), 'utf8'));
+  assert.deepEqual(written, doc);
 });

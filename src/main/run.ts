@@ -5,6 +5,7 @@ import type {
   RunActionResult,
   RunBlockerKind,
   ReviewerSessionState,
+  RunFindings,
   RunPromptLogEntry,
   RunSnapshot,
   RunSourceDetail,
@@ -535,6 +536,27 @@ export function updateCurrentRunReviewer(
 ): RunSnapshot | null {
   if (!currentRun) return null;
   currentRun = updateReviewerSession(currentRun, paneId, patch, now);
+  return currentRun;
+}
+
+/**
+ * Attach the parsed reviewer findings + merge-gate doc to a run, returning a new
+ * snapshot (the input is never mutated). Recorded by the review-synthesis step
+ * (issue #11) so the dashboard renders the latest blockers/merge gate; the same
+ * doc is mirrored to `.godmode/runs/<run-id>/findings.json`.
+ */
+export function setRunFindings(run: RunSnapshot, findings: RunFindings, now?: string): RunSnapshot {
+  const at = now ?? findings.fetchedAt ?? new Date().toISOString();
+  return { ...run, findings, updatedAt: at };
+}
+
+/**
+ * Set the current run's parsed findings (controller wrapper). Returns the updated
+ * snapshot, or null when there is no active run.
+ */
+export function setCurrentRunFindings(findings: RunFindings, now?: string): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = setRunFindings(currentRun, findings, now);
   return currentRun;
 }
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AppRepoState,
   AgentRole,
+  BuilderHandoff,
   CommitVerification,
   ProjectConfigState,
   RolePaneConfig,
@@ -15,6 +16,7 @@ import { GithubPane } from './components/GithubPane.js';
 import { HandoffPane } from './components/HandoffPane.js';
 import { ProjectBar } from './components/ProjectBar.js';
 import { ReviewLaunchPane } from './components/ReviewLaunchPane.js';
+import { ReviewSynthesisPane } from './components/ReviewSynthesisPane.js';
 import { RunControlPane, STATUS_LABEL, type RunDispatchOptions } from './components/RunControlPane.js';
 import { VerificationPane } from './components/VerificationPane.js';
 
@@ -76,6 +78,10 @@ export function App() {
   const [verifying, setVerifying] = useState(false);
   const [startReviewersError, setStartReviewersError] = useState<string | null>(null);
   const [startingReviewers, setStartingReviewers] = useState(false);
+  const [fixHandoff, setFixHandoff] = useState<BuilderHandoff | null>(null);
+  const [synthesizing, setSynthesizing] = useState(false);
+  const [sendingFix, setSendingFix] = useState(false);
+  const [synthError, setSynthError] = useState<string | null>(null);
   // Monotonic id for the latest run request. Like the GitHub pane, a run fetch
   // snapshots state in main at invocation time, so a late `getRun()` for the
   // previous operated project must never repopulate stale run state. Mutations
@@ -147,6 +153,8 @@ export function App() {
     setRunError(null);
     setSendError(null);
     setVerification(null);
+    setFixHandoff(null);
+    setSynthError(null);
   }, []);
 
   // Run the branch/PR/commit verification evidence gate. Main reads live
@@ -193,6 +201,43 @@ export function App() {
     setStartReviewersError(result.ok ? null : result.error);
   }, []);
 
+  // Synthesize reviewer findings into the merge gate and drive the first fix
+  // cycle. Main re-runs the #9 gate, parses each reviewer's captured output, and
+  // routes the run (merge_ready / request_fix / needs_human / hold). A fix cycle
+  // returns the rendered pointer-first fix handoff for operator review.
+  const synthesizeReviews = useCallback(async () => {
+    if (!window.godmode) return;
+    setSynthesizing(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.synthesizeReviews();
+      if (seq !== runRequestSeq.current) return;
+      if (result.run) setRun(result.run);
+      setFixHandoff(result.ok ? result.fixHandoff ?? null : null);
+      setSynthError(result.ok ? null : result.error);
+    } finally {
+      setSynthesizing(false);
+    }
+  }, []);
+
+  // Send the rendered fix handoff into the builder session. Main does no live gh
+  // round trip — it gates on the recorded verified merge findings (prVerified +
+  // bound PR URL), recomposes the fix prompt from the run's accepted blockers, and
+  // writes it in.
+  const sendFix = useCallback(async () => {
+    if (!window.godmode) return;
+    setSendingFix(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.sendFix();
+      if (seq !== runRequestSeq.current) return;
+      if (result.run) setRun(result.run);
+      setSynthError(result.ok ? null : result.error);
+    } finally {
+      setSendingFix(false);
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     void window.godmode?.getApp().then((state) => {
@@ -217,6 +262,8 @@ export function App() {
       // stale result so the previous repo's evidence never lingers.
       setVerification(null);
       setStartReviewersError(null);
+      setFixHandoff(null);
+      setSynthError(null);
       void refreshRun();
     });
     // Main pushes the run snapshot when async reviewer lifecycle changes (a
@@ -409,6 +456,15 @@ export function App() {
                 starting={startingReviewers}
                 onStart={startReviewers}
                 onPostComment={postReviewerComment}
+              />
+              <ReviewSynthesisPane
+                run={run}
+                fixHandoff={fixHandoff}
+                synthesizing={synthesizing}
+                sendingFix={sendingFix}
+                error={synthError}
+                onSynthesize={synthesizeReviews}
+                onSendFix={sendFix}
               />
             </section>
           </section>

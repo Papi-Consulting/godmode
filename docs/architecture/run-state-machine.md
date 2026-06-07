@@ -59,6 +59,12 @@ Fix loop:
 review_synthesis → builder_fixing → fix_pushed → reviewers_rerunning → review_synthesis
 ```
 
+Review synthesis (#11) is what computes these forward edges from evidence: it
+parses the reviewer sessions into normalized findings, computes the merge gate
+from those findings plus the verified #9 status, and dispatches `synthesize_reviews`
+then one of `mark_merge_ready` / `request_fix` / `flag_needs_human` /
+`exceed_max_cycles` accordingly. See `docs/architecture/review-synthesis.md`.
+
 `request_fix` increments the `cycle` counter (the fix-loop iteration) and is
 bounded by `maxCycles`: once `cycle >= maxCycles` the guard drops `request_fix`
 from `availableActions` and rejects it if attempted, so the loop stops

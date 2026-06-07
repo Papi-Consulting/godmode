@@ -206,6 +206,145 @@ export function composeBuilderHandoff(
   };
 }
 
+/** Coordinates of the verified PR a fix cycle targets. */
+export type FixPrTarget = { number: number; url: string; branch?: string };
+
+/** Options for {@link composeFixHandoff}: the verified PR and normalized blockers. */
+export type ComposeFixOptions = {
+  projectName?: string;
+  pr?: FixPrTarget;
+  /** Normalized accepted-blocker text (from `renderBlockersText`), bound to `{{blockers}}`. */
+  blockersText: string;
+  /** Number of accepted blockers; a fix with zero blockers is not sendable. */
+  blockerCount: number;
+};
+
+/**
+ * The pointer-first grounding block for a fix handoff. Like the builder handoff,
+ * it directs the builder to read the operated project's canonical sources and the
+ * **live** PR/review artifacts itself — never a pasted reviewer transcript. The
+ * accepted blockers travel as a compact normalized capsule (in the template body),
+ * but the builder is pointed back to the live PR threads for the full reviewer
+ * context (issue #11). Every source is scoped to the operated project.
+ */
+function fixGroundingBlock(
+  run: RunSnapshot | null,
+  projectName: string | undefined,
+  pr: FixPrTarget | undefined,
+): string {
+  const project = projectName ? `"${projectName}"` : '(unnamed)';
+  const issueNumber = run?.sourceType === 'github_issue' ? run.issueNumber : undefined;
+  const lines: string[] = [];
+  lines.push('== Builder fix handoff (GodMode) ==');
+  lines.push(
+    `Continue work on the OPERATED PROJECT ${project} — the repo opened in GodMode, NOT the GodMode ` +
+      "app repo. Your working directory is that project's root. Read its canonical sources and the live " +
+      'PR/review artifacts yourself before changing code:',
+  );
+  lines.push('- AGENTS.md — process, authority, and safety rules');
+  lines.push('- docs/spec.md — current product/technical spec');
+  if (pr) {
+    lines.push(
+      `- gh pr view ${pr.number} --json title,body,comments,reviews,statusCheckRollup — the live PR threads/checks`,
+    );
+    lines.push(`- gh pr diff ${pr.number} — the current code under review`);
+  }
+  if (issueNumber !== undefined) {
+    lines.push(`- gh issue view ${issueNumber} --comments — the linked issue and its acceptance criteria`);
+  }
+  lines.push('');
+  lines.push('Fix target:');
+  if (pr) {
+    lines.push(`- PR #${pr.number}: ${pr.url}`);
+    if (pr.branch) lines.push(`- Branch: ${pr.branch}`);
+  } else {
+    lines.push('- No verified PR bound — open/link a PR before fixing.');
+  }
+  lines.push('');
+  lines.push(
+    'Address every accepted blocker listed above by reading the reviewer’s own PR comment for each, then ' +
+      'commit and push to the PR branch. Do not resolve a blocker on assertion alone; verify the change.',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Compose the builder **fix** handoff for a run (issue #11): render the
+ * `builder_fix` template with the verified PR coordinates and the normalized
+ * accepted-blocker text (so `{{blockers}}` is never left unresolved), then append
+ * the pointer-first grounding block. Pure, mirroring {@link composeBuilderHandoff}.
+ *
+ * Sendable only when a real run + verified PR are bound, the template left no
+ * unresolved variables, and at least one accepted blocker exists — there is
+ * nothing to fix otherwise.
+ */
+export function composeFixHandoff(
+  config: GodmodeConfig,
+  run: RunSnapshot | null,
+  options: ComposeFixOptions,
+): BuilderHandoff {
+  const { projectName, pr, blockersText, blockerCount } = options;
+
+  const builder = buildRoleResolutions(config).find((role) => role.role === 'builder');
+  const agentId = builder?.agentId ?? config.roles.builder.agent;
+  const agent = config.agents[agentId];
+  const displayName = builder?.displayName ?? agentId;
+  const adapter = builder?.adapter ?? agent.adapter;
+  const mode = builder?.mode ?? agent.mode;
+  const project = projectName ?? '<selected-project>';
+  const commandLine = `${agent.command} --project ${project}`;
+
+  const templates = { ...DEFAULT_TEMPLATES, ...config.commands };
+  const vars: Record<string, string> = { blockers: blockersText };
+  if (projectName) vars.projectName = projectName;
+  if (pr) {
+    vars.prNumber = String(pr.number);
+    vars.prUrl = pr.url;
+    if (pr.branch) vars.branch = pr.branch;
+  }
+  if (run?.issueNumber !== undefined) vars.issueNumber = String(run.issueNumber);
+  if (run?.issueTitle) vars.issueTitle = run.issueTitle;
+  const { prompt: templatePrompt, missingVariables } = renderTemplate(templates.builder_fix, vars);
+
+  const prompt = `${templatePrompt}\n\n${fixGroundingBlock(run, projectName, pr)}`;
+
+  const isMock = run === null || pr === undefined;
+  const hasBlockers = blockerCount > 0;
+  const canSend = !isMock && missingVariables.length === 0 && hasBlockers;
+
+  let blockedReason: string | undefined;
+  if (isMock) {
+    blockedReason = 'No verified PR is bound. Verify the PR (#9) before launching a fix cycle.';
+  } else if (!hasBlockers) {
+    blockedReason = 'No accepted blockers to fix.';
+  } else if (missingVariables.length > 0) {
+    blockedReason = `Unresolved template variables: ${missingVariables.join(', ')}.`;
+  }
+
+  const sourceLabel = !run
+    ? undefined
+    : run.sourceType === 'github_issue'
+      ? `issue #${run.issueNumber} — ${run.issueTitle ?? '(untitled)'}`
+      : `manual task ${run.sourceId}${run.issueTitle ? ` — ${run.issueTitle}` : ''}`;
+
+  return {
+    isMock,
+    sourceType: run?.sourceType,
+    sourceId: run?.sourceId,
+    sourceLabel,
+    issueUrl: run?.sourceDetail?.url,
+    displayName,
+    agentId,
+    adapter,
+    delivery: deliveryFor(mode),
+    commandLine,
+    prompt,
+    missingVariables,
+    canSend,
+    blockedReason,
+  };
+}
+
 /** List the `.md` doc filenames under one project-relative dir (bounded, best-effort). */
 function listDocs(projectRoot: string, dir: string): string[] {
   const docs: string[] = [];

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { RunFindings } from '../shared/types.js';
 
 /**
  * Local run-artifact helpers (issue #10). Reviewer session output is captured to
@@ -61,6 +62,46 @@ export function reviewerArtifactPath(projectRoot: string, runId: string, reviewe
 export function appendArtifact(absPath: string, data: string): boolean {
   try {
     fs.appendFileSync(absPath, data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read a reviewer's captured-output artifact (issue #11). Returns the file's text,
+ * or null when it is absent/unreadable — a reviewer whose output was never
+ * captured parses to an ambiguous result rather than crashing synthesis.
+ */
+export function readReviewerArtifact(projectRoot: string, runId: string, reviewerId: string): string | null {
+  try {
+    return fs.readFileSync(reviewerArtifactPath(projectRoot, runId, reviewerId), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** `.godmode/runs/<run-id>/findings.json` — the persisted parsed-findings doc path. */
+export function runFindingsRelPath(runId: string): string {
+  return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId), 'findings.json');
+}
+
+/** Absolute path to a run's `findings.json` under the operated project. */
+export function runFindingsPath(projectRoot: string, runId: string): string {
+  return path.resolve(projectRoot, '.godmode', 'runs', safeArtifactSegment(runId), 'findings.json');
+}
+
+/**
+ * Persist a run's parsed findings + merge-gate doc to
+ * `.godmode/runs/<run-id>/findings.json` (issue #11), returning whether the write
+ * succeeded. Best-effort like {@link appendArtifact}: a failed write is reported
+ * (so the caller can note it) but never throws — the findings already live on the
+ * in-memory run snapshot, so a lost file does not lose the synthesis.
+ */
+export function writeRunFindings(projectRoot: string, runId: string, findings: RunFindings): boolean {
+  try {
+    ensureRunArtifactDir(projectRoot, runId);
+    fs.writeFileSync(runFindingsPath(projectRoot, runId), `${JSON.stringify(findings, null, 2)}\n`);
     return true;
   } catch {
     return false;
