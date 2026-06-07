@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   canPostReviewerMarker,
   composeReviewerLaunch,
+  isReviewerRunContextStale,
   resolveReviewerExit,
   reviewerCommentBody,
   reviewerLaunchTransition,
@@ -200,4 +201,16 @@ test('only a reviewer session that actually ran can have its marker posted', () 
   assert.equal(canPostReviewerMarker('failed'), false);
   assert.equal(canPostReviewerMarker('launching'), false);
   assert.equal(canPostReviewerMarker('idle'), false);
+});
+
+test('isReviewerRunContextStale detects a changed run or operated project across an await', () => {
+  const captured = { runId: 'run-10', root: '/p/alpha' };
+  // Unchanged context → not stale, safe to mutate.
+  assert.equal(isReviewerRunContextStale({ runId: 'run-10', root: '/p/alpha' }, captured), false);
+  // Run cleared mid-await (no current run) → stale.
+  assert.equal(isReviewerRunContextStale({ runId: null, root: '/p/alpha' }, captured), true);
+  // A different run now current (same pane ids) → stale.
+  assert.equal(isReviewerRunContextStale({ runId: 'run-11', root: '/p/alpha' }, captured), true);
+  // Operated project switched → stale.
+  assert.equal(isReviewerRunContextStale({ runId: 'run-10', root: '/p/beta' }, captured), true);
 });

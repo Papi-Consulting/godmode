@@ -36,6 +36,7 @@ import {
 import {
   canPostReviewerMarker,
   composeReviewerLaunch,
+  isReviewerRunContextStale,
   resolveReviewerExit,
   reviewerCommentBody,
   reviewerLaunchTransition,
@@ -443,7 +444,25 @@ async function postReviewerCommentAndRecord(paneId: AgentRole): Promise<Reviewer
     artifactRelPath,
   });
 
-  const result = await postPrComment(getSelectedProjectRoot(), run.prNumber, body);
+  // Capture the run/root before the live `gh` call so we can confirm they still
+  // match after the await — the operator may switch project, clear the run, or
+  // start another run mid-post.
+  const captured = { runId: run.id, root: getSelectedProjectRoot() };
+  const result = await postPrComment(captured.root, run.prNumber, body);
+
+  // Stale guard: if the run or operated project changed while the comment posted,
+  // do NOT patch whatever run is now current (a different run shares pane ids) or
+  // push a stale snapshot. The comment did reach GitHub; we just don't mutate the
+  // wrong run.
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The run or operated project changed while posting the reviewer comment; no run state was changed.',
+      run: getCurrentRun(),
+    };
+  }
+
   if (!result.ok) {
     // Record on `commentError`, not the session status: the session outcome is
     // unchanged and the post stays retryable via the override.
@@ -527,8 +546,8 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
     };
   }
 
-  const startRunId = run.id;
-  const projectRoot = getSelectedProjectRoot();
+  const captured = { runId: run.id, root: getSelectedProjectRoot() };
+  const projectRoot = captured.root;
   const now = new Date().toISOString();
 
   // #9 evidence gate: re-verify live and record it. Never trust plain PR
@@ -540,18 +559,17 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
   // run and kills sessions. Re-confirm the same run and root before any side
   // effect, so a stale invocation can never spawn PTYs or write artifacts into a
   // root the run no longer belongs to (AGENTS.md operated-project safety rule).
-  const live = getCurrentRun();
-  if (!live || live.id !== startRunId || getSelectedProjectRoot() !== projectRoot) {
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
     return {
       ok: false,
       code: 'invalid_state',
       error: 'The run or operated project changed during verification; reviewers were not launched.',
-      run: live,
+      run: getCurrentRun(),
       verification,
     };
   }
 
-  let updated = recordCurrentRunVerification(verification) ?? live;
+  let updated = recordCurrentRunVerification(verification) ?? run;
   if (verification.status !== 'verified' || !verification.pr) {
     emitRunChanged(updated);
     return { ok: false, code: 'not_verified', error: verification.message, run: updated, verification };

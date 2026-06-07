@@ -38,7 +38,10 @@ run and kills sessions. So after the await, before any side effect, the handler
 **re-confirms the same run id and selected root** captured at the start; if either
 changed it aborts without spawning a PTY or writing an artifact, honoring the
 AGENTS.md rule that agent commands only ever run in the currently selected
-operated-project root.
+operated-project root. The same guard wraps the comment-post path (`gh pr comment`
+is also awaited): the pure `isReviewerRunContextStale(current, captured)` predicate
+is shared by both so neither mutates — nor pushes a snapshot for — whatever run is
+current after the await if it has drifted.
 
 ## Pointer-first prompts
 
@@ -159,8 +162,10 @@ to PR/reviewer/role-doc with no pasted diff, `missingVariables`, the verified ga
 `reviewerCommentBody` (role-signed, artifact-referencing, no merge-readiness claim),
 `reviewerLaunchTransition` (initial + fix-cycle launch/relaunch, disallowed
 statuses), `resolveReviewerExit` (non-zero exit → failed/no-post, clean exit →
-completed, already-failed kept), and `canPostReviewerMarker` (only a ran session is
-postable; failed/launching are not). `test/artifacts.test.js` covers the artifact
+completed, already-failed kept), `canPostReviewerMarker` (only a ran session is
+postable; failed/launching are not), and `isReviewerRunContextStale` (run cleared,
+different run, or changed root across an await → stale). `test/artifacts.test.js`
+covers the artifact
 path/dir/append helpers over a
 temp dir, the captured-write success/failure return, and the reviewer-id
 path-confinement guard. `test/run.test.js` covers the reviewer-session reducers

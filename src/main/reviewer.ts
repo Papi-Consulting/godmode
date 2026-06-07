@@ -260,6 +260,25 @@ export function canPostReviewerMarker(status: ReviewerSessionStatus): boolean {
   return POSTABLE_REVIEWER_STATUSES.includes(status);
 }
 
+/**
+ * Whether the live run/operated-project context has drifted from what an async
+ * reviewer operation captured before it `await`ed a live `gh`/`git` call. The
+ * operator can switch projects, clear the run, or start another run mid-await
+ * (which clears the current run and kills sessions), so every reviewer side
+ * effect after an await — spawning a PTY, writing an artifact, patching reviewer
+ * state, emitting a snapshot — must first confirm it is still acting on the same
+ * run in the same root. A stale context (no current run, a different run id, or a
+ * changed root) means the operation must abort without mutating whatever run is
+ * now current. Pure so both the launch and comment-post guards share one tested
+ * predicate.
+ */
+export function isReviewerRunContextStale(
+  current: { runId: string | null; root: string },
+  captured: { runId: string; root: string },
+): boolean {
+  return current.runId !== captured.runId || current.root !== captured.root;
+}
+
 export function resolveReviewerExit(status: ReviewerSessionStatus, exitCode: number): ReviewerExitOutcome {
   if (status === 'failed') return { kind: 'keep_failed' };
   if (exitCode !== 0) {
