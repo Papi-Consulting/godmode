@@ -67,6 +67,21 @@ test('a verified PR produces a startable, pointer-first plan per configured revi
   assert.match(a.prompt, /it is not pasted here/);
 });
 
+test('default reviewers are one-shot and launch the non-interactive codex exec path', () => {
+  // Regression guard: a one-shot reviewer must run to completion and exit (so it
+  // auto-posts), which requires the non-interactive `codex exec` command — plain
+  // `codex` opens the interactive CLI and never returns.
+  const plan = composeReviewerLaunch(DEFAULT_CONFIG, issueRun(), {
+    projectName: 'godmode',
+    pr: PR,
+    verified: true,
+  });
+  for (const reviewer of plan.reviewers) {
+    assert.equal(reviewer.delivery, 'oneshot');
+    assert.match(reviewer.commandLine, /codex exec/);
+  }
+});
+
 test('an unverified PR blocks launch even when the PR is bound', () => {
   const plan = composeReviewerLaunch(DEFAULT_CONFIG, issueRun(), {
     projectName: 'godmode',

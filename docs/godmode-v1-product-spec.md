@@ -560,7 +560,7 @@ agents:
     mode: interactive
   codex:
     adapter: cli
-    command: codex
+    command: codex exec
     mode: oneshot
 ```
 
@@ -794,7 +794,7 @@ agents:
     mode: interactive
   codex:
     adapter: cli
-    command: codex
+    command: codex exec
     mode: oneshot
 ```
 

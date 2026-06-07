@@ -13,6 +13,7 @@ export const GODMODE_IPC = {
   registryGet: 'godmode:registry:get',
   githubGet: 'godmode:github:get',
   githubIssueGet: 'godmode:github:issue:get',
+  githubChanged: 'godmode:github:changed',
   runGet: 'godmode:run:get',
   runSelectIssue: 'godmode:run:select-issue',
   runSelectManual: 'godmode:run:select-manual',

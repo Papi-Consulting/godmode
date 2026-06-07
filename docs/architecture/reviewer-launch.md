@@ -66,6 +66,13 @@ is written into the PTY after spawn (`writeToPtySession`). Writing into a PTY wh
 one-shot process had already exited would silently no-op and drop the prompt — the
 argv path avoids that race.
 
+The one-shot command itself must be the agent's **non-interactive** invocation, or
+it never exits and the reviewer sits in `running` forever. The default Codex
+reviewer therefore ships `command: codex exec` (the non-interactive path that runs
+a prompt to completion), not plain `codex` (which opens the interactive CLI). This
+stays in config (default + per-project), not core code, so the harness never
+hardcodes a vendor's exec syntax.
+
 The session's `onData` both streams to the renderer (`godmode:pty:data`, so the
 reviewer pane shows it) and appends to `.godmode/runs/<run-id>/<reviewer-id>.log`.
 Capture never throws into the data callback, but a capture *failure* is **not**
@@ -95,6 +102,11 @@ element (no shell), so there is no quoting/injection surface.
 `godmode:run:reviewers:comment` is the operator override: it re-posts the marker
 for a named reviewer pane, covering interactive reviewers that never exit and
 retrying a failed post.
+
+A successful post mutates the PR, so the operated project's GitHub snapshot is now
+stale. The main process emits `godmode:github:changed`, and the GitHub pane
+refetches in place (same project, newer data) so the new comment/status shows
+without a manual refresh.
 
 ## Errors and async updates
 

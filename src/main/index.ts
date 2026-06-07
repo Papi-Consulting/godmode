@@ -439,6 +439,9 @@ async function postReviewerCommentAndRecord(paneId: AgentRole): Promise<Reviewer
       error: undefined,
     }) ?? run;
   emitRunChanged(updated);
+  // The PR now has a new comment, so the operated project's GitHub snapshot is
+  // stale — signal the GitHub pane to refetch (issue #10: refresh after posting).
+  emitToRenderer(GODMODE_IPC.githubChanged, undefined);
   return { ok: true, run: updated, commentUrl: result.url };
 }
 

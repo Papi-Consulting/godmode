@@ -51,5 +51,8 @@ agents:
     mode: interactive
   codex:
     adapter: cli
-    command: codex
+    # Non-interactive Codex path: runs the prompt to completion and exits, so a
+    # one-shot reviewer auto-posts on completion. Plain `codex` opens the
+    # interactive CLI and never returns.
+    command: codex exec
     mode: oneshot

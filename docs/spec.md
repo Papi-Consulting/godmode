@@ -162,10 +162,13 @@ and shown in the dashboard. On each reviewer's session exit GodMode auto-posts o
 concise **role-signed marker** comment via `gh pr comment` (the one mutating `gh`
 call) — a factual marker that the session ran and where its output was captured,
 explicitly *not* a merge-readiness claim, and never the agent's pasted output; the
-reviewer's own findings are its separate PR comments. An operator override re-posts
-or covers interactive reviewers that do not exit. Launch, capture, and comment
-failures are surfaced visibly per reviewer and never collapse into "complete". See
-`docs/architecture/reviewer-launch.md`.
+reviewer's own findings are its separate PR comments. A successful post refreshes
+the operated project's GitHub snapshot so the new comment shows without a manual
+refresh. An operator override re-posts or covers interactive reviewers that do not
+exit. Launch, capture, and comment failures are surfaced visibly per reviewer and
+never collapse into "complete". One-shot reviewers use the agent's non-interactive
+command (the default Codex reviewer ships `codex exec`) so they run to completion
+and auto-post. See `docs/architecture/reviewer-launch.md`.
 
 ## V1 UX Shape
 

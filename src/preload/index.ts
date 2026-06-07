@@ -70,6 +70,11 @@ const api = {
     ipcRenderer.on(GODMODE_IPC.runChanged, listener);
     return () => ipcRenderer.off(GODMODE_IPC.runChanged, listener);
   },
+  onGithubChanged: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(GODMODE_IPC.githubChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.githubChanged, listener);
+  },
   startPty: (input: { paneId: string }) =>
     ipcRenderer.invoke(GODMODE_IPC.ptyStart, input) as Promise<PtyStartResult | undefined>,
   writePty: (input: { paneId: string; data: string }) => ipcRenderer.send(GODMODE_IPC.ptyWrite, input),
