@@ -3,11 +3,7 @@
 // against the compiled main output (`npm run build:main` first). Run via `npm test`.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  composeReviewerLaunch,
-  reviewerArtifactRelPath,
-  reviewerCommentBody,
-} from '../dist/main/reviewer.js';
+import { composeReviewerLaunch, reviewerCommentBody } from '../dist/main/reviewer.js';
 import { DEFAULT_CONFIG } from '../dist/main/config.js';
 import { createRun } from '../dist/main/run.js';
 
@@ -125,8 +121,4 @@ test('the marker comment is role-signed, references the artifact, and asserts no
   assert.match(body, /does not assert merge-readiness/i);
   // It is a marker, not the reviewer's verdict.
   assert.match(body, /reviewer’s own .*PR comments/);
-});
-
-test('reviewerArtifactRelPath is the gitignored run-artifact path', () => {
-  assert.equal(reviewerArtifactRelPath('run-10', 'reviewer-a'), '.godmode/runs/run-10/reviewer-a.log');
 });

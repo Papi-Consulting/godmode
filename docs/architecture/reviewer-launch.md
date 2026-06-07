@@ -56,12 +56,24 @@ Each configured reviewer is launched independently in its existing pane
 (`reviewer_a` / `reviewer_b`). `resolveRoleLaunch` provides the command and
 enforces the same cli-adapter gate as a manual pane launch — a non-cli adapter
 fails *visibly* on that reviewer rather than silently. `openPtySession` runs the
-command with the operated-project root as cwd and the sanitized env; the prompt is
-delivered by writing it into the live PTY (mirroring the builder handoff, mode
-stays advisory in v1). The session's `onData` both streams to the renderer
-(`godmode:pty:data`, so the reviewer pane shows it) and appends to
-`.godmode/runs/<run-id>/<reviewer-id>.log` (best-effort; a lost write never
-crashes the stream). `.godmode/runs/` is gitignored.
+command with the operated-project root as cwd and the sanitized env.
+
+**Prompt delivery is mode-aware** so a one-shot reviewer never loses its prompt: a
+`oneshot` agent reads its prompt and exits, so the prompt is passed as a final
+launch argument (`openPtySession`'s `extraArgs`, one argv element, no shell) and
+is present when the process starts; an interactive agent stays live, so the prompt
+is written into the PTY after spawn (`writeToPtySession`). Writing into a PTY whose
+one-shot process had already exited would silently no-op and drop the prompt — the
+argv path avoids that race.
+
+The session's `onData` both streams to the renderer (`godmode:pty:data`, so the
+reviewer pane shows it) and appends to `.godmode/runs/<run-id>/<reviewer-id>.log`.
+Capture never throws into the data callback, but a capture *failure* is **not**
+swallowed: `appendArtifact` returns whether the write succeeded, and the first
+failed write flips the reviewer to `failed` with a visible reason. The reviewer-id
+segment is sanitized to a single safe path component (config only guarantees a
+slug — see the schema regex — but the path layer confines it regardless), so a bad
+id can never escape the run dir. `.godmode/runs/` is gitignored.
 
 Each reviewer is tracked on `RunSnapshot.reviewers` with an independent status:
 `launching → running → completed → comment_posted`, or `failed`. The state is set
@@ -86,9 +98,13 @@ retrying a failed post.
 
 ## Errors and async updates
 
-Every failure mode — launch failure, a `gh` post failure, a missing PR number — is
-recorded on the reviewer as `failed` with a visible reason and **never** collapsed
-into `completed`, so the dashboard never shows a silently-finished review. Because
+Every failure mode — launch failure, output-capture failure, a `gh` post failure,
+or a missing PR number — is recorded on the reviewer as `failed` with a visible
+reason and **never** collapsed into `completed`. A reviewer already marked `failed`
+mid-session (a capture failure) keeps that status on exit — the exit handler
+records the exit code but does not flip it to `completed` or post a marker that
+references an artifact it failed to write. So the dashboard never shows a
+silently-finished review. Because
 the session-exit and comment-post updates happen asynchronously after the IPC call
 returns, the main process pushes the latest snapshot over `godmode:run:changed`
 (mirroring `projectChanged`); the renderer treats it as authoritative and the
@@ -97,9 +113,10 @@ GitHub pane refreshes its snapshot on the same signal.
 ## Tests
 
 `test/reviewer.test.js` covers `composeReviewerLaunch` (pointer-first prompt bound
-to PR/reviewer/role-doc with no pasted diff, `missingVariables`, the verified gate),
-`reviewerCommentBody` (role-signed, artifact-referencing, no merge-readiness
-claim), and `reviewerArtifactRelPath`. `test/artifacts.test.js` covers the
-artifact path/dir/append helpers over a temp dir. `test/run.test.js` covers the
-reviewer-session reducers (immutability + lifecycle transitions). All are pure —
-no Electron, no real spawn, no `gh`. Run with `npm test`.
+to PR/reviewer/role-doc with no pasted diff, `missingVariables`, the verified gate)
+and `reviewerCommentBody` (role-signed, artifact-referencing, no merge-readiness
+claim). `test/artifacts.test.js` covers the artifact path/dir/append helpers over a
+temp dir, the captured-write success/failure return, and the reviewer-id
+path-confinement guard. `test/run.test.js` covers the reviewer-session reducers
+(immutability + lifecycle transitions). All are pure — no Electron, no real spawn,
+no `gh`. Run with `npm test`.

@@ -29,7 +29,13 @@ const roleEntrySchema = z.object({
 const headSchema = roleEntrySchema.extend({ pane: z.literal('head') });
 const builderSchema = roleEntrySchema.extend({ pane: z.literal('builder') });
 const reviewerSchema = roleEntrySchema.extend({
-  id: z.string().min(1),
+  // A slug: reviewer ids are used as path segments for run artifacts
+  // (`.godmode/runs/<run-id>/<id>.log`) and as PR-comment signatures, so they
+  // must not contain path separators or `..` that could escape the run dir.
+  id: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z0-9_-]+$/, 'reviewer id must be a slug ([A-Za-z0-9_-]) with no path separators'),
   pane: z.enum(['reviewer_a', 'reviewer_b']),
 });
 

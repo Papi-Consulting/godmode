@@ -12,9 +12,27 @@ import path from 'node:path';
  * `src/main/index.ts`.
  */
 
+/**
+ * Reduce an id to a single safe path segment. Reviewer ids come from project
+ * config, where the schema only guarantees a non-empty string, so a value
+ * containing `/`, `\`, or `..` could otherwise escape `.godmode/runs/<run-id>/`.
+ * Mapping every character outside `[A-Za-z0-9_-]` to `_` keeps the artifact
+ * confined to the run dir by construction (a defense-in-depth complement to the
+ * id slug check in the config schema). Empty input collapses to `_`.
+ */
+export function safeArtifactSegment(segment: string): string {
+  const safe = segment.replace(/[^A-Za-z0-9_-]/g, '_');
+  return safe.length > 0 ? safe : '_';
+}
+
 /** Project-relative directory holding a run's artifacts. */
 export function runArtifactRelDir(runId: string): string {
-  return path.posix.join('.godmode', 'runs', runId);
+  return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId));
+}
+
+/** `.godmode/runs/<run-id>/<reviewer-id>.log` — the captured-output artifact path. */
+export function reviewerArtifactRelPath(runId: string, reviewerId: string): string {
+  return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId), `${safeArtifactSegment(reviewerId)}.log`);
 }
 
 /**
@@ -23,26 +41,28 @@ export function runArtifactRelDir(runId: string): string {
  * treated as a single path segment (it is harness-generated, not user input).
  */
 export function ensureRunArtifactDir(projectRoot: string, runId: string): string {
-  const dir = path.resolve(projectRoot, '.godmode', 'runs', runId);
+  const dir = path.resolve(projectRoot, '.godmode', 'runs', safeArtifactSegment(runId));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 /** Absolute path to one reviewer's captured-output log under the operated project. */
 export function reviewerArtifactPath(projectRoot: string, runId: string, reviewerId: string): string {
-  return path.resolve(projectRoot, '.godmode', 'runs', runId, `${reviewerId}.log`);
+  return path.resolve(projectRoot, '.godmode', 'runs', safeArtifactSegment(runId), `${safeArtifactSegment(reviewerId)}.log`);
 }
 
 /**
- * Append captured session output to an artifact file. Best-effort: a write
- * failure (e.g. the dir was removed) never throws into the PTY data callback —
- * capture is auxiliary to the live stream, so a lost write must not crash the
- * session.
+ * Append captured session output to an artifact file, returning whether the write
+ * succeeded. A failure (e.g. the dir was removed) never throws into the PTY data
+ * callback — a lost write must not crash the live session — but the boolean lets
+ * the caller record a *visible* capture failure on the reviewer rather than
+ * silently marking the review complete (issue #10 acceptance).
  */
-export function appendArtifact(absPath: string, data: string): void {
+export function appendArtifact(absPath: string, data: string): boolean {
   try {
     fs.appendFileSync(absPath, data);
+    return true;
   } catch {
-    // Capture is best-effort; the live stream and PR comment are the contract.
+    return false;
   }
 }

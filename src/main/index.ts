@@ -27,8 +27,13 @@ import {
   updateCurrentRunReviewer,
 } from './run.js';
 import { getCurrentHandoff, promptDigest } from './handoff.js';
-import { ensureRunArtifactDir, appendArtifact, reviewerArtifactPath } from './artifacts.js';
-import { composeReviewerLaunch, reviewerArtifactRelPath, reviewerCommentBody } from './reviewer.js';
+import {
+  appendArtifact,
+  ensureRunArtifactDir,
+  reviewerArtifactPath,
+  reviewerArtifactRelPath,
+} from './artifacts.js';
+import { composeReviewerLaunch, reviewerCommentBody } from './reviewer.js';
 import type {
   AgentRole,
   HandoffSendResult,
@@ -445,7 +450,15 @@ async function postReviewerCommentAndRecord(paneId: AgentRole): Promise<Reviewer
  */
 async function handleReviewerExit(paneId: AgentRole, exitCode: number): Promise<void> {
   const run = getCurrentRun();
-  if (!run?.reviewers?.some((reviewer) => reviewer.paneId === paneId)) return;
+  const session = run?.reviewers?.find((reviewer) => reviewer.paneId === paneId);
+  if (!session) return;
+  // A capture failure during the session already marked this reviewer `failed`.
+  // Honor that — record the exit code for audit, but do not flip it back to
+  // `completed` or post a marker that references an artifact we failed to write.
+  if (session.status === 'failed') {
+    emitRunChanged(updateCurrentRunReviewer(paneId, { exitCode }));
+    return;
+  }
   const updated = updateCurrentRunReviewer(paneId, { status: 'completed', exitCode });
   emitRunChanged(updated);
   await postReviewerCommentAndRecord(paneId);
@@ -550,12 +563,30 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
     }
 
     const absArtifact = reviewerArtifactPath(projectRoot, updated.id, reviewer.reviewerId);
+    const relArtifact = reviewerArtifactRelPath(updated.id, reviewer.reviewerId);
+    // A one-shot reviewer reads its prompt and exits, so deliver the prompt as a
+    // launch argument (present at spawn) rather than writing it into the PTY
+    // afterward, which could no-op against an already-exited process and lose the
+    // prompt. Interactive reviewers stay live, so the prompt is written in.
+    const oneshot = resolved.spec.mode === 'oneshot';
+    // Capture is best-effort, but a capture *failure* must be visible, not
+    // silently dropped. The first failed write flips the reviewer to `failed`
+    // (once), and the exit handler then skips marking it completed/comment-posted.
+    let captureFailed = false;
     const result = openPtySession({
       paneId: reviewer.paneId,
       projectRoot,
       command: resolved.spec.command,
+      extraArgs: oneshot ? [reviewer.prompt] : undefined,
       onData: (data) => {
-        appendArtifact(absArtifact, data);
+        if (!appendArtifact(absArtifact, data) && !captureFailed) {
+          captureFailed = true;
+          updateCurrentRunReviewer(reviewer.paneId, {
+            status: 'failed',
+            error: `Output capture failed: could not write ${relArtifact}.`,
+          });
+          emitRunChanged(getCurrentRun());
+        }
         emitToRenderer(GODMODE_IPC.ptyData, { paneId: reviewer.paneId, data });
       },
       onExit: (exit) => {
@@ -568,9 +599,10 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       continue;
     }
 
-    // Deliver the pointer-first prompt into the live reviewer PTY, mirroring the
-    // builder handoff: the trailing carriage return commits the input line.
-    writeToPtySession(reviewer.paneId, `${reviewer.prompt}\r`);
+    // Interactive delivery only: stream the pointer-first prompt into the live
+    // reviewer PTY (the trailing carriage return commits the line). One-shot
+    // reviewers already received it as a launch argument above.
+    if (!oneshot) writeToPtySession(reviewer.paneId, `${reviewer.prompt}\r`);
     updateCurrentRunReviewer(reviewer.paneId, { status: 'running', pid: result.pid });
     launched += 1;
   }

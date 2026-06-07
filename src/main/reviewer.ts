@@ -48,11 +48,6 @@ function deliveryFor(mode: string): ReviewerHandoff['delivery'] {
   return mode === 'oneshot' ? 'oneshot' : 'interactive';
 }
 
-/** `.godmode/runs/<run-id>/<reviewer-id>.log` — the captured-output artifact path. */
-export function reviewerArtifactRelPath(runId: string, reviewerId: string): string {
-  return `.godmode/runs/${runId}/${reviewerId}.log`;
-}
-
 /**
  * The pointer-first required-reading block appended to each reviewer prompt. It
  * directs a FRESH reviewer to read the operated project's own sources and the
