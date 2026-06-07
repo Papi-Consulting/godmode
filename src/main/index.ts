@@ -505,16 +505,28 @@ async function postReviewerCommentAndRecord(paneId: AgentRole): Promise<Reviewer
   return { ok: true, run: updated, commentUrl: result.url };
 }
 
+/** The per-launch token currently tracked for a reviewer pane, if any. */
+function currentReviewerToken(paneId: AgentRole): string | undefined {
+  return getCurrentRun()?.reviewers?.find((reviewer) => reviewer.paneId === paneId)?.sessionToken;
+}
+
 /**
  * Handle a reviewer PTY session exit: mark the session `completed` (capturing the
  * exit code), then auto-post the role-signed marker comment. A reviewer that
  * already failed to launch has no live session, so this only fires for sessions
  * that actually ran.
+ *
+ * `sessionToken` is the launch this PTY belonged to. A prior launch's PTY is
+ * killed only when its pane's `openPtySession` runs, so on a same-run relaunch an
+ * old PTY can exit during the spawn window and fire this with the previous token
+ * while the tracked record already carries the new one. Such a stale exit is
+ * refused so it can never complete/post — or fail — the freshly launched session.
  */
-async function handleReviewerExit(paneId: AgentRole, exitCode: number): Promise<void> {
+async function handleReviewerExit(paneId: AgentRole, exitCode: number, sessionToken: string): Promise<void> {
   const run = getCurrentRun();
   const session = run?.reviewers?.find((reviewer) => reviewer.paneId === paneId);
   if (!session) return;
+  if (isReviewerSessionStale(session.sessionToken, sessionToken)) return;
 
   const outcome = resolveReviewerExit(session.status, exitCode);
   // A capture failure mid-session already marked this reviewer `failed`; record
@@ -623,6 +635,17 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
 
   ensureRunArtifactDir(projectRoot, updated.id);
 
+  // One fresh per-launch identity per reviewer, shared by the tracked record AND
+  // that launch's PTY callbacks. An idempotent same-run relaunch installs new
+  // tokens here but the prior launch's PTYs are killed only when each pane's
+  // openPtySession runs below — so an old PTY can still exit/emit during the
+  // spawn window. Carrying the token into the callbacks lets a stale one be told
+  // apart from the freshly installed session and refused (delayed marker posts
+  // are guarded the same way after their `gh` await).
+  const launchTokens = new Map<AgentRole, string>(
+    plan.reviewers.map((reviewer) => [reviewer.paneId, randomUUID()]),
+  );
+
   // Record every reviewer as `launching` first so the dashboard shows tracked
   // reviewers even when a subsequent launch fails.
   updated =
@@ -630,9 +653,7 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       plan.reviewers.map((reviewer) => ({
         reviewerId: reviewer.reviewerId,
         paneId: reviewer.paneId,
-        // Fresh per-launch identity: an in-flight post from a prior same-run
-        // launch captured the old token and is refused after this relaunch.
-        sessionToken: randomUUID(),
+        sessionToken: launchTokens.get(reviewer.paneId) ?? randomUUID(),
         displayName: reviewer.displayName,
         roleDoc: reviewer.roleDoc,
         status: 'launching' as const,
@@ -660,6 +681,9 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
     // afterward, which could no-op against an already-exited process and lose the
     // prompt. Interactive reviewers stay live, so the prompt is written in.
     const oneshot = resolved.spec.mode === 'oneshot';
+    // This launch's identity, closed over by its PTY callbacks so a stale
+    // callback from a prior same-run launch can never patch the fresh session.
+    const sessionToken = launchTokens.get(reviewer.paneId) ?? randomUUID();
     // Capture is best-effort, but a capture *failure* must be visible, not
     // silently dropped. The first failed write flips the reviewer to `failed`
     // (once), and the exit handler then skips marking it completed/comment-posted.
@@ -672,17 +696,21 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       onData: (data) => {
         if (!appendArtifact(absArtifact, data) && !captureFailed) {
           captureFailed = true;
-          updateCurrentRunReviewer(reviewer.paneId, {
-            status: 'failed',
-            error: `Output capture failed: could not write ${relArtifact}.`,
-          });
-          emitRunChanged(getCurrentRun());
+          // Only patch if the tracked session is still this launch's: a relaunch
+          // may have replaced it under this pane while the old PTY drained.
+          if (!isReviewerSessionStale(currentReviewerToken(reviewer.paneId), sessionToken)) {
+            updateCurrentRunReviewer(reviewer.paneId, {
+              status: 'failed',
+              error: `Output capture failed: could not write ${relArtifact}.`,
+            });
+            emitRunChanged(getCurrentRun());
+          }
         }
         emitToRenderer(GODMODE_IPC.ptyData, { paneId: reviewer.paneId, data });
       },
       onExit: (exit) => {
         emitToRenderer(GODMODE_IPC.ptyExit, { paneId: reviewer.paneId, exit });
-        void handleReviewerExit(reviewer.paneId, exit.exitCode);
+        void handleReviewerExit(reviewer.paneId, exit.exitCode, sessionToken);
       },
     });
     if (!result.ok) {

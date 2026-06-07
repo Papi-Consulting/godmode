@@ -46,12 +46,20 @@ current after the await if it has drifted.
 The run/root guard alone does not catch a relaunch **within the same run and
 root**: reviewers relaunch idempotently (`reviewers_running` /
 `reviewers_rerunning`), replacing the tracked sessions under the same pane ids. So
-each launch stamps every session with a fresh per-launch `sessionToken`, and the
-comment-post path captures that token before its `gh pr comment` await and
-re-confirms it with `isReviewerSessionStale(currentToken, capturedToken)`
-afterward. An in-flight post from an earlier launch therefore cannot stamp a
-freshly relaunched session `comment_posted`/`commentError` with the previous
-comment — its token no longer matches.
+each launch stamps every session with a fresh per-launch `sessionToken`, and any
+deferred work bound to one launch re-confirms it with
+`isReviewerSessionStale(currentToken, capturedToken)` before it patches reviewer
+state:
+
+- **Marker posts** capture the token before the `gh pr comment` await and re-check
+  it after, so an in-flight post from an earlier launch cannot stamp a freshly
+  relaunched session `comment_posted`/`commentError` with the previous comment.
+- **PTY lifecycle callbacks** (`onData` capture-failure, `onExit`) close over
+  their launch's token. A prior launch's PTY is killed only when its pane's
+  `openPtySession` runs, so on a relaunch an old PTY can still exit or emit during
+  the spawn window; carrying the token lets `handleReviewerExit` and the
+  capture-failure path refuse a stale callback rather than `complete`/post — or
+  fail — the just-installed session.
 
 ## Pointer-first prompts
 
