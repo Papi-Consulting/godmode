@@ -1,5 +1,61 @@
 export type AgentRole = 'head' | 'builder' | 'reviewer_a' | 'reviewer_b';
 
+/**
+ * Workspace isolation mode for a run's builder/fix sessions (issue #41).
+ * - `shared`: builder works directly in the operated-project checkout (today's
+ *   behavior, the default for one release of soak time).
+ * - `worktree`: GodMode gives the run its own `git worktree` of the operated
+ *   project so an agent switching branches / rewriting files can never collide
+ *   with the running app's checkout or another session's uncommitted work.
+ */
+export type WorkspaceIsolation = 'shared' | 'worktree';
+
+/**
+ * A run-scoped git worktree of the operated project (issue #41). The worktree
+ * **is** the operated project at a different path (same repo, same conceptual
+ * context), created on its own branch so the primary checkout is never touched by
+ * the builder. Serializable like the rest of {@link RunSnapshot}.
+ */
+export type RunWorktree = {
+  /** Absolute path to the worktree directory (a sibling of the primary checkout). */
+  path: string;
+  /** Branch the worktree was created on (the run's working branch). */
+  branch: string;
+  /** ISO timestamp the worktree was created (main owns the clock). */
+  createdAt: string;
+};
+
+/** Whether a managed worktree is safe to remove, with the reasons when it is not. */
+export type WorktreeCleanliness = {
+  /** True only when there are no uncommitted changes and no unpushed commits. */
+  clean: boolean;
+  /** True when `git status` shows uncommitted/untracked changes. */
+  dirty: boolean;
+  /** True when HEAD has commits not present on any remote-tracking branch. */
+  unpushed: boolean;
+  /** Human-readable reasons cleanup is refused, when not clean. */
+  reasons: string[];
+};
+
+/**
+ * A GodMode-managed worktree discovered for the operated project (issue #41),
+ * with its cleanliness so the UI can offer cleanup with the same dirty-check
+ * rules. Used to list orphaned worktrees on app start / project select.
+ */
+export type ManagedWorktree = {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  cleanliness: WorktreeCleanliness;
+  /** True when this worktree belongs to the currently-active run. */
+  isCurrentRun: boolean;
+};
+
+/** Result of a worktree cleanup attempt (issue #41). */
+export type WorktreeCleanupResult =
+  | { ok: true; removedPath: string }
+  | { ok: false; error: string };
+
 export type AgentMode = 'interactive' | 'oneshot' | 'oneshot_or_interactive';
 
 /**
@@ -330,8 +386,12 @@ export type CommitCheckSummary = {
   failing: number;
 };
 
-/** Where the expected commit being verified came from. */
-export type ExpectedCommitSource = 'run_recorded' | 'local_head' | 'unknown';
+/**
+ * Where the expected commit being verified came from. `branch_tip` is the tip of
+ * the run's working branch (correct for worktree runs, where the primary checkout
+ * stays on another branch); `local_head` is the primary checkout's HEAD fallback.
+ */
+export type ExpectedCommitSource = 'run_recorded' | 'branch_tip' | 'local_head' | 'unknown';
 
 /**
  * A single commit-verification result for the operated project's current
@@ -640,6 +700,19 @@ export type RunSnapshot = {
   /** 1-based fix-loop counter; advances each time a fix cycle is requested. */
   cycle: number;
   maxCycles: number;
+  /**
+   * Effective workspace isolation for this run (issue #41). Bound at run creation
+   * from `workspace.isolation` config (default `shared`), and toggleable via the
+   * dogfooding nudge before the builder starts. When `worktree`, the builder/fix
+   * sessions run in {@link worktree} rather than the operated-project checkout.
+   */
+  isolation: WorkspaceIsolation;
+  /**
+   * The run-scoped git worktree, once created (issue #41). Present only when
+   * {@link isolation} is `worktree` and the builder session has been prepared.
+   * Carries the working branch so verification/reviewers scope to it.
+   */
+  worktree?: RunWorktree;
   /** Why the run is paused/blocked/failed/needs-human, when relevant. */
   reason?: string;
   /** Which spec blocker condition mapped onto `needs_human`, when relevant. */
@@ -687,6 +760,18 @@ export type RunActionResult =
   | { ok: false; code: RunRejectionCode; error: string; run: RunSnapshot | null };
 
 /**
+ * Result of the operator's "Clear run" request (issue #41). Clearing discards the
+ * run record, so it is a guarded terminal-only operation: it is refused while a
+ * run is still active, still owns a git worktree, or has a live builder session —
+ * which would otherwise orphan the worktree/PTY with no run record protecting it.
+ * On refusal the run is preserved and `error` explains the lifecycle step to take
+ * first (cancel/close, then clean up the worktree).
+ */
+export type ClearRunResult =
+  | { ok: true; run: null }
+  | { ok: false; error: string; run: RunSnapshot };
+
+/**
  * The reviewed builder handoff for the current run: the exact prompt GodMode
  * would write into the configured builder session, bound to the selected
  * issue/task and grounded in the harness reading rules. Producing it never sends
@@ -716,6 +801,12 @@ export type BuilderHandoff = {
   commandLine: string;
   /** The fully composed prompt that would be written to the builder session. */
   prompt: string;
+  /**
+   * The run worktree path named as the working root, when the run is isolated
+   * (issue #41). Undefined for a shared-checkout run; surfaced so the operator
+   * preview shows exactly where the builder will work.
+   */
+  worktreePath?: string;
   /** Template variables left unbound; a non-empty list blocks send. */
   missingVariables: string[];
   /** True only when a real source is bound and no template variables are missing. */
@@ -730,6 +821,7 @@ export type HandoffRejectionCode =
   | 'not_sendable'
   | 'invalid_state'
   | 'no_builder_session'
+  | 'worktree_failed'
   | 'invalid_transition'
   | 'invalid_payload';
 

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { getAppRepoState } from './appRepo.js';
 import { getCommitVerification, getGithubState, getIssueDetail, postPrComment } from './github.js';
 import {
+  getPtySessionCwd,
   hasPtySession,
   killAllPtySessions,
   openPtySession,
@@ -14,20 +15,33 @@ import {
   writeToPtySession,
 } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
-import { DEFAULT_CONFIG, getConfigState, loadConfig } from './config.js';
+import { DEFAULT_CONFIG, getConfigState, loadConfig, resolveWorkspaceIsolation } from './config.js';
 import { getRegistryState, resolveRoleLaunch } from './agents.js';
 import {
   clearRun,
   dispatchRunAction,
+  evaluateClearRun,
   getCurrentRun,
+  isTerminalStatus,
   recordCurrentRunPrompt,
   recordCurrentRunVerification,
   selectIssueRun,
   selectManualTaskRun,
   setCurrentRunFindings,
+  setCurrentRunIsolation,
   setCurrentRunReviewers,
+  setCurrentRunWorktree,
   updateCurrentRunReviewer,
 } from './run.js';
+import {
+  createWorktree,
+  deriveWorktreePlan,
+  inspectWorktree,
+  isGitRepo,
+  isManagedWorktreePath,
+  listManagedWorktrees,
+  removeWorktree,
+} from './worktree.js';
 import { composeFixHandoff, getCurrentHandoff, promptDigest } from './handoff.js';
 import {
   appendArtifact,
@@ -55,7 +69,9 @@ import {
 import type {
   AgentRole,
   BuilderHandoff,
+  ClearRunResult,
   HandoffSendResult,
+  ManagedWorktree,
   ReviewSynthesisResult,
   ReviewerCommentResult,
   ReviewerResult,
@@ -63,7 +79,9 @@ import type {
   RunSnapshot,
   RunSourceDetail,
   RunVerificationResult,
+  RunWorktree,
   StartReviewersResult,
+  WorktreeCleanupResult,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
@@ -133,6 +151,8 @@ const runSelectManualSchema = z.object({
   title: z.string().min(1).max(200),
   text: z.string().min(1).max(20_000),
 });
+const runIsolationSchema = z.object({ isolation: z.enum(['worktree', 'shared']) });
+const worktreeCleanupSchema = z.object({ path: z.string().min(1).max(4096) });
 
 function parseIpcPayload<T>(schema: z.ZodType<T>, input: unknown): T | undefined {
   const parsed = schema.safeParse(input);
@@ -252,6 +272,65 @@ function handleGetGithub() {
   return getGithubState(getSelectedProjectRoot(), new Date().toISOString());
 }
 
+/** Resolve the operated project's configured workspace isolation (issue #41). */
+function currentConfigIsolation(): 'shared' | 'worktree' {
+  const loaded = loadConfig();
+  const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
+  return resolveWorkspaceIsolation(config);
+}
+
+/**
+ * Ensure the run-scoped git worktree exists for an isolated run (issue #41),
+ * creating it on its branch on first use and reusing it on fix cycles. Idempotent:
+ * a run that already has a live worktree dir returns it unchanged. Records the
+ * worktree (and working branch) on the run and emits the change. Returns a tagged
+ * result so callers can tell "isolation off" apart from a real creation failure
+ * (e.g. not a git repo), which must surface visibly and never advance the run.
+ */
+async function ensureRunWorktree(
+  run: RunSnapshot,
+): Promise<
+  | { mode: 'shared' }
+  | { mode: 'worktree'; ok: true; worktree: RunWorktree }
+  | { mode: 'worktree'; ok: false; error: string }
+> {
+  if (run.isolation !== 'worktree') return { mode: 'shared' };
+
+  const projectRoot = getSelectedProjectRoot();
+  if (!(await isGitRepo(projectRoot))) {
+    return {
+      mode: 'worktree',
+      ok: false,
+      error: 'The operated project is not a git repository, so a run worktree cannot be created.',
+    };
+  }
+
+  // Reuse the recorded worktree on fix cycles / pane restarts, but NEVER on a
+  // bare directory-exists check: a recorded directory that was manually removed
+  // and recreated, converted to a foreign repo, or moved to the wrong branch after
+  // initial creation must not be returned as valid and launched as the builder
+  // cwd. Routing the recorded plan back through createWorktree runs the full
+  // validateReusableWorktree gate (registered worktree of this repo, on the
+  // expected branch) and surfaces a visible reason on conflict (issue #41).
+  const plan = run.worktree
+    ? { dir: run.worktree.path, branch: run.worktree.branch }
+    : deriveWorktreePlan(projectRoot, run.id);
+  const created = await createWorktree({ projectRoot, dir: plan.dir, branch: plan.branch });
+  if (!created.ok) {
+    return { mode: 'worktree', ok: false, error: created.error };
+  }
+
+  const worktree: RunWorktree = {
+    path: created.dir,
+    branch: created.branch,
+    // Preserve the original creation timestamp across validated reuse.
+    createdAt: run.worktree?.createdAt ?? new Date().toISOString(),
+  };
+  const updated = setCurrentRunWorktree(worktree);
+  if (updated) emitRunChanged(updated);
+  return { mode: 'worktree', ok: true, worktree };
+}
+
 function handleGetRun() {
   return getCurrentRun();
 }
@@ -283,6 +362,7 @@ async function handleSelectIssueRun(_event: Electron.IpcMainInvokeEvent, input: 
     issueNumber: payload.issueNumber,
     issueTitle: payload.issueTitle,
     maxCycles: payload.maxCycles,
+    isolation: currentConfigIsolation(),
     sourceDetail,
   });
 }
@@ -298,7 +378,11 @@ function handleSelectManualTask(_event: Electron.IpcMainInvokeEvent, input: unkn
   if (!payload) {
     return { ok: false, code: 'invalid_payload', error: 'Invalid manual task payload.', run: getCurrentRun() };
   }
-  return selectManualTaskRun({ title: payload.title, text: payload.text });
+  return selectManualTaskRun({
+    title: payload.title,
+    text: payload.text,
+    isolation: currentConfigIsolation(),
+  });
 }
 
 function handleGetHandoff() {
@@ -316,20 +400,10 @@ const HANDOFF_START_STATUSES = new Set(['issue_selected', 'needs_spec', 'ready_t
  * Reaching `builder_running` records that the prompt was *sent* — never that the
  * task succeeded.
  */
-function handleSendHandoff(): HandoffSendResult {
-  const run = getCurrentRun();
+async function handleSendHandoff(): Promise<HandoffSendResult> {
+  let run = getCurrentRun();
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to send a handoff for.', run: null };
-  }
-
-  const handoff = getCurrentHandoff(run);
-  if (!handoff.canSend) {
-    return {
-      ok: false,
-      code: 'not_sendable',
-      error: handoff.blockedReason ?? 'This handoff is not ready to send.',
-      run,
-    };
   }
 
   if (!HANDOFF_START_STATUSES.has(run.status)) {
@@ -341,6 +415,30 @@ function handleSendHandoff(): HandoffSendResult {
     };
   }
 
+  // Isolation (issue #41): sending the builder handoff creates the run-scoped
+  // worktree on its branch (or reuses it). A creation failure is visible and the
+  // run does NOT advance as if the handoff were ready.
+  const ensured = await ensureRunWorktree(run);
+  if (ensured.mode === 'worktree' && !ensured.ok) {
+    return {
+      ok: false,
+      code: 'worktree_failed',
+      error: `Run worktree setup failed: ${ensured.error}`,
+      run: getCurrentRun(),
+    };
+  }
+  run = getCurrentRun() ?? run;
+
+  const handoff = getCurrentHandoff(run);
+  if (!handoff.canSend) {
+    return {
+      ok: false,
+      code: 'not_sendable',
+      error: handoff.blockedReason ?? 'This handoff is not ready to send.',
+      run,
+    };
+  }
+
   if (!hasPtySession('builder')) {
     return {
       ok: false,
@@ -348,6 +446,22 @@ function handleSendHandoff(): HandoffSendResult {
       error: 'No live builder session. Start the builder pane first, then approve & send.',
       run,
     };
+  }
+
+  // When the run is isolated, the live builder PTY must actually be running in the
+  // run worktree before we deliver the prompt — never into the shared checkout. If
+  // the pane was started before the worktree existed, ask the operator to restart
+  // it (handleStartPty launches the builder in the worktree once the run has one).
+  if (ensured.mode === 'worktree' && ensured.ok) {
+    const builderCwd = getPtySessionCwd('builder');
+    if (builderCwd !== ensured.worktree.path) {
+      return {
+        ok: false,
+        code: 'no_builder_session',
+        error: `Isolation is enabled: restart the builder pane so it launches in the run worktree (${ensured.worktree.path}), then approve & send.`,
+        run,
+      };
+    }
   }
 
   // Deliver the prompt into the live builder PTY. Interactive CLIs read it as a
@@ -387,7 +501,7 @@ async function handleVerifyRun(): Promise<RunVerificationResult> {
   const run = getCurrentRun();
   const verification = await getCommitVerification(
     getSelectedProjectRoot(),
-    { expectedCommit: run?.expectedCommit },
+    { expectedCommit: run?.expectedCommit, branch: run?.worktree ? run.branch : undefined },
     new Date().toISOString(),
   );
   // Persist the result on the current run for an auditable evidence trail. With
@@ -595,8 +709,13 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
   const now = new Date().toISOString();
 
   // #9 evidence gate: re-verify live and record it. Never trust plain PR
-  // existence or an agent self-report as enough to launch reviewers.
-  const verification = await getCommitVerification(projectRoot, { expectedCommit: run.expectedCommit }, now);
+  // existence or an agent self-report as enough to launch reviewers. When the run
+  // is isolated (#41) its branch lives in the worktree, so verify against it.
+  const verification = await getCommitVerification(
+    projectRoot,
+    { expectedCommit: run.expectedCommit, branch: run.worktree ? run.branch : undefined },
+    now,
+  );
 
   // Stale guard: the operator may have switched the operated project (or cleared
   // the run) during the await above — `selectProjectAndResetSessions` clears the
@@ -846,8 +965,13 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
   const now = new Date().toISOString();
 
   // #9 evidence gate: re-verify live and record it. The merge gate consumes this
-  // verified status, not plain PR existence or an agent self-report.
-  const verification = await getCommitVerification(projectRoot, { expectedCommit: run.expectedCommit }, now);
+  // verified status, not plain PR existence or an agent self-report. An isolated
+  // run (#41) is verified against its worktree branch.
+  const verification = await getCommitVerification(
+    projectRoot,
+    { expectedCommit: run.expectedCommit, branch: run.worktree ? run.branch : undefined },
+    now,
+  );
 
   // Stale guard: the operator may have switched project or cleared/replaced the
   // run during the await. Re-confirm the same run and root before any mutation.
@@ -917,6 +1041,7 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
           pr,
           blockersText: renderBlockersText(blockers),
           blockerCount: blockers.length,
+          worktreePath: updated.worktree?.path,
         });
       }
     }
@@ -944,8 +1069,8 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
  * was *delivered*, never that the fix succeeded — the operator dispatches
  * `push_fix` after the builder pushes.
  */
-function handleSendFix(): HandoffSendResult {
-  const run = getCurrentRun();
+async function handleSendFix(): Promise<HandoffSendResult> {
+  let run = getCurrentRun();
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to send a fix for.', run: null };
   }
@@ -986,6 +1111,21 @@ function handleSendFix(): HandoffSendResult {
     };
   }
 
+  // Isolation (issue #41): the fix cycle reuses the same run worktree/branch. Make
+  // sure it still exists and the builder PTY is running in it before delivering.
+  const ensured = await ensureRunWorktree(run);
+  if (ensured.mode === 'worktree' && !ensured.ok) {
+    return { ok: false, code: 'worktree_failed', error: `Run worktree setup failed: ${ensured.error}`, run: getCurrentRun() };
+  }
+  if (ensured.mode === 'worktree' && ensured.ok && getPtySessionCwd('builder') !== ensured.worktree.path) {
+    return {
+      ok: false,
+      code: 'no_builder_session',
+      error: `Isolation is enabled: restart the builder pane so it launches in the run worktree (${ensured.worktree.path}), then send the fix.`,
+      run,
+    };
+  }
+
   const loaded = loadConfig();
   const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
   const pr = { number: run.prNumber, url: run.findings.prUrl, branch: run.branch };
@@ -994,6 +1134,7 @@ function handleSendFix(): HandoffSendResult {
     pr,
     blockersText: renderBlockersText(blockers),
     blockerCount: blockers.length,
+    worktreePath: run.worktree?.path,
   });
   if (!handoff.canSend) {
     return { ok: false, code: 'not_sendable', error: handoff.blockedReason ?? 'The fix handoff is not ready to send.', run };
@@ -1019,12 +1160,20 @@ function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) 
   return dispatchRunAction(action, options);
 }
 
-function handleClearRun() {
-  clearRun();
-  return getCurrentRun();
+/**
+ * Guarded "Clear run" (issue #41). Clearing drops the run record, so it is refused
+ * while the run is still active, still owns a git worktree, or has a live builder
+ * session — otherwise the worktree/PTY would be orphaned with no run protecting it
+ * from cleanup. The operator is routed through cancel/close + worktree cleanup
+ * first; the run record is preserved until then.
+ */
+function handleClearRun(): ClearRunResult {
+  const decision = evaluateClearRun(getCurrentRun(), hasPtySession('builder'));
+  if (decision.ok) clearRun();
+  return decision;
 }
 
-function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
+async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
   const payload = parseIpcPayload(ptyStartSchema, input);
   if (!payload) return undefined;
 
@@ -1035,13 +1184,37 @@ function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
     return { ok: false, paneId: payload.paneId, error: launch.error };
   }
 
+  const projectRoot = getSelectedProjectRoot();
+
+  // Isolation (issue #41): the builder pane launches in the run's worktree when
+  // the active run is isolated; every other pane (head, reviewers) stays in the
+  // operated-project root (read-only roles, and the GitHub/harness scope). A
+  // worktree creation failure is visible — never silently launch in the root.
+  let cwd = projectRoot;
+  let worktreePath: string | undefined;
+  if (payload.paneId === 'builder') {
+    const run = getCurrentRun();
+    if (run && run.isolation === 'worktree') {
+      const ensured = await ensureRunWorktree(run);
+      if (ensured.mode === 'worktree') {
+        if (!ensured.ok) {
+          return { ok: false, paneId: payload.paneId, error: `Run worktree setup failed: ${ensured.error}` };
+        }
+        cwd = ensured.worktree.path;
+        worktreePath = ensured.worktree.path;
+      }
+    }
+  }
+
   const stopOwnedSession = () => stopPtySession(payload.paneId);
   event.sender.once('destroyed', stopOwnedSession);
   event.sender.once('did-start-navigation', stopOwnedSession);
 
   return openPtySession({
     paneId: payload.paneId,
-    projectRoot: getSelectedProjectRoot(),
+    projectRoot,
+    cwd,
+    worktreePath,
     command: launch.spec.command,
     onData: (data) => event.sender.send(GODMODE_IPC.ptyData, { paneId: payload.paneId, data }),
     onExit: (exit) => event.sender.send(GODMODE_IPC.ptyExit, { paneId: payload.paneId, exit }),
@@ -1066,6 +1239,86 @@ function handleStopPty(_event: Electron.IpcMainEvent, input: unknown) {
   stopPtySession(payload.paneId);
 }
 
+/** Statuses from which the operator may still flip a run's isolation (issue #41). */
+const ISOLATION_TOGGLE_STATUSES = new Set(['issue_selected', 'needs_spec', 'ready_to_build']);
+
+/**
+ * Set the current run's workspace isolation (issue #41 dogfooding nudge). Only
+ * allowed before the builder starts — once a worktree is in use, switching modes
+ * mid-run would orphan it. Returns the updated run, or a typed rejection.
+ */
+function handleSetRunIsolation(_event: Electron.IpcMainInvokeEvent, input: unknown) {
+  const payload = parseIpcPayload(runIsolationSchema, input);
+  if (!payload) {
+    return { ok: false, code: 'invalid_payload', error: 'Invalid isolation payload.', run: getCurrentRun() };
+  }
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run.', run: null };
+  }
+  if (!ISOLATION_TOGGLE_STATUSES.has(run.status)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `Isolation can only be changed before the builder starts (current: ${run.status}).`,
+      run,
+    };
+  }
+  const updated = setCurrentRunIsolation(payload.isolation) ?? run;
+  emitRunChanged(updated);
+  return { ok: true, run: updated };
+}
+
+/** List GodMode-managed worktrees for the operated project, with cleanliness (#41). */
+function handleListWorktrees(): Promise<ManagedWorktree[]> {
+  return listManagedWorktrees(getSelectedProjectRoot(), getCurrentRun()?.worktree?.path);
+}
+
+/**
+ * Remove a GodMode-managed worktree (issue #41). Refuses anything outside the
+ * managed dir, the active run's worktree while the run is still live, and any tree
+ * with uncommitted changes or unpushed commits — dirty work is never auto-deleted.
+ * Clean removal succeeds and, when it was the current run's worktree, clears it
+ * from the run snapshot.
+ */
+async function handleCleanupWorktree(
+  _event: Electron.IpcMainInvokeEvent,
+  input: unknown,
+): Promise<WorktreeCleanupResult> {
+  const payload = parseIpcPayload(worktreeCleanupSchema, input);
+  if (!payload) return { ok: false, error: 'Invalid worktree cleanup payload.' };
+
+  const projectRoot = getSelectedProjectRoot();
+  const target = path.resolve(payload.path);
+  if (!isManagedWorktreePath(projectRoot, target)) {
+    return { ok: false, error: 'Refusing to remove a path that is not a GodMode-managed worktree.' };
+  }
+
+  const run = getCurrentRun();
+  const isCurrentRunWorktree = run?.worktree !== undefined && path.resolve(run.worktree.path) === target;
+  if (isCurrentRunWorktree && run && !isTerminalStatus(run.status)) {
+    return {
+      ok: false,
+      error: `The run is still active (${run.status}); finish, close, or cancel it before cleaning up its worktree.`,
+    };
+  }
+
+  const cleanliness = await inspectWorktree(target);
+  if (!cleanliness.clean) {
+    return { ok: false, error: `Refusing to remove worktree: ${cleanliness.reasons.join(' ')}` };
+  }
+
+  const removed = await removeWorktree({ projectRoot, dir: target });
+  if (!removed.ok) return { ok: false, error: removed.error };
+
+  if (isCurrentRunWorktree) {
+    const updated = setCurrentRunWorktree(null);
+    if (updated) emitRunChanged(updated);
+  }
+  console.log(`[godmode] Removed clean run worktree: ${target}`);
+  return { ok: true, removedPath: target };
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.appGet, handleGetApp);
   ipcMain.handle(GODMODE_IPC.projectGet, handleGetProject);
@@ -1087,6 +1340,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runReviewerComment, handlePostReviewerComment);
   ipcMain.handle(GODMODE_IPC.runSynthesizeReviews, handleSynthesizeReviews);
   ipcMain.handle(GODMODE_IPC.runSendFix, handleSendFix);
+  ipcMain.handle(GODMODE_IPC.runSetIsolation, handleSetRunIsolation);
+  ipcMain.handle(GODMODE_IPC.worktreeList, handleListWorktrees);
+  ipcMain.handle(GODMODE_IPC.worktreeCleanup, handleCleanupWorktree);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);

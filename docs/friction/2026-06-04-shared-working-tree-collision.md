@@ -33,7 +33,16 @@ The work was fully recoverable from `stash@{0}`. Recovery + isolation steps:
 
 ## Harness update needed?
 
-Maybe. Worth considering whether GodMode should give each agent session its own
-git worktree (or clone) by default rather than sharing one checkout, so the
-PR-loop roles cannot stash/checkout over each other. Filed as friction for now;
-no code change in this PR.
+**Resolved by issue #41.** GodMode now gives each run's builder/fix sessions an
+isolated `git worktree` of the operated project when `workspace.isolation: worktree`
+is enabled (default `shared` for one release of soak time). The builder works on a
+per-run branch in a sibling `.godmode-worktrees/<project>-<run-id>` directory, so it
+can never stash/checkout over the primary checkout or another session's uncommitted
+work. The PTY cwd allowlist admits only the operated-project root or the active
+run's worktree, and dogfooding (`isAppRepo`) surfaces a UI nudge to turn isolation
+on. Reviewer roles stay read-only in the operated-project root and need no
+isolation. See `docs/architecture/run-worktree-isolation.md`.
+
+The original closing question — "whether GodMode should give each agent session its
+own git worktree by default" — is answered: yes for the builder role, opt-in via
+config today, with a dogfooding nudge.

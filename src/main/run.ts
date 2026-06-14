@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  ClearRunResult,
   CommitVerification,
   RunAction,
   RunActionResult,
@@ -13,6 +14,8 @@ import type {
   RunStatus,
   RunTransitionLogEntry,
   RunVerificationLogEntry,
+  RunWorktree,
+  WorkspaceIsolation,
 } from '../shared/types.js';
 
 /**
@@ -256,6 +259,11 @@ export type CreateRunInput = {
   /** Selected-source detail (issue body/comments/URL, or manual task text). */
   sourceDetail?: RunSourceDetail;
   maxCycles?: number;
+  /**
+   * Effective workspace isolation for the run (issue #41). Resolved from config by
+   * the caller (run.ts is Electron/config-free); defaults to `shared`.
+   */
+  isolation?: WorkspaceIsolation;
   /** Provide a stable id (and timestamp) for deterministic tests. */
   id?: string;
   now?: string;
@@ -294,6 +302,7 @@ export function createRun(input: CreateRunInput = {}): RunSnapshot {
     status: 'idle',
     cycle: 1,
     maxCycles: input.maxCycles ?? DEFAULT_MAX_CYCLES,
+    isolation: input.isolation ?? 'shared',
     availableActions: [],
     log: [],
     prompts: [],
@@ -315,6 +324,11 @@ let currentRun: RunSnapshot | null = null;
  * still live and must be explicitly cleared/closed before a new issue is started.
  */
 const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['closed', 'cancelled', 'karan_merged']);
+
+/** Whether a run status is a finished lifecycle endpoint (issue #41 cleanup gate). */
+export function isTerminalStatus(status: RunStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
 
 /** The current run snapshot, or null when no run has been started/cleared. */
 export function getCurrentRun(): RunSnapshot | null {
@@ -352,6 +366,8 @@ export type SelectManualTaskInput = {
   /** Free-text task description, grounded into the handoff prompt. */
   text: string;
   maxCycles?: number;
+  /** Effective workspace isolation for the run (issue #41). Defaults to `shared`. */
+  isolation?: WorkspaceIsolation;
   /** Provide a stable id (and timestamp) for deterministic tests. */
   id?: string;
   now?: string;
@@ -380,6 +396,7 @@ export function selectManualTaskRun(input: SelectManualTaskInput): RunActionResu
     issueTitle: input.title,
     sourceDetail: { body: input.text },
     maxCycles: input.maxCycles,
+    isolation: input.isolation,
     id: input.id,
     now: input.now,
   });
@@ -561,9 +578,90 @@ export function setCurrentRunFindings(findings: RunFindings, now?: string): RunS
 }
 
 /**
+ * Set a run's effective workspace isolation, returning a new snapshot (the input
+ * is never mutated). Used by the dogfooding nudge to flip a run to `worktree`
+ * before the builder starts. Switching to `shared` does not remove an
+ * already-created worktree — the caller decides cleanup separately.
+ */
+export function setRunIsolation(run: RunSnapshot, isolation: WorkspaceIsolation, now?: string): RunSnapshot {
+  const at = now ?? new Date().toISOString();
+  return { ...run, isolation, updatedAt: at };
+}
+
+/** Set the current run's isolation (controller wrapper). Null when no active run. */
+export function setCurrentRunIsolation(isolation: WorkspaceIsolation, now?: string): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = setRunIsolation(currentRun, isolation, now);
+  return currentRun;
+}
+
+/**
+ * Attach (or clear) the run-scoped worktree, returning a new snapshot (the input
+ * is never mutated). When a worktree is set, its branch is recorded as the run's
+ * working branch so verification/reviewers scope to it; clearing it (after
+ * cleanup) leaves the recorded branch in place for audit.
+ */
+export function setRunWorktree(run: RunSnapshot, worktree: RunWorktree | null, now?: string): RunSnapshot {
+  const at = now ?? new Date().toISOString();
+  if (!worktree) {
+    const next = { ...run, updatedAt: at };
+    delete next.worktree;
+    return next;
+  }
+  return { ...run, worktree, branch: worktree.branch, updatedAt: at };
+}
+
+/** Set/clear the current run's worktree (controller wrapper). Null when no run. */
+export function setCurrentRunWorktree(worktree: RunWorktree | null, now?: string): RunSnapshot | null {
+  if (!currentRun) return null;
+  currentRun = setRunWorktree(currentRun, worktree, now);
+  return currentRun;
+}
+
+/**
+ * Decide whether the operator's "Clear run" request is allowed (issue #41).
+ * Clearing drops the run record, so it must not strand the run's worktree or a
+ * live builder session with nothing tracking them: it is refused while the run is
+ * still active (non-terminal), still owns a worktree (clean it up first), or has a
+ * live builder PTY (stop it first). Pure — the caller supplies the live-session
+ * flag and performs the actual {@link clearRun} only when this returns `ok`.
+ */
+export function evaluateClearRun(
+  run: RunSnapshot | null,
+  hasLiveBuilderSession: boolean,
+): ClearRunResult {
+  if (run) {
+    if (!isTerminalStatus(run.status)) {
+      return {
+        ok: false,
+        run,
+        error: `The run is still active (${run.status}). Cancel or close it before clearing, so its worktree and sessions are cleaned up first.`,
+      };
+    }
+    if (run.worktree) {
+      return {
+        ok: false,
+        run,
+        error: 'This run still has a git worktree. Clean it up via the worktree controls before clearing the run.',
+      };
+    }
+    if (hasLiveBuilderSession) {
+      return {
+        ok: false,
+        run,
+        error: 'The builder session is still running. Stop it before clearing the run.',
+      };
+    }
+  }
+  return { ok: true, run: null };
+}
+
+/**
  * Discard the current run entirely (the "cleared" outcome): the dashboard returns
  * to a no-run state. Distinct from the `close` action, which records a terminal
- * `closed` status while keeping the run and its log visible.
+ * `closed` status while keeping the run and its log visible. The operator-facing
+ * guard ({@link evaluateClearRun}) lives in the IPC handler; this low-level reset
+ * is also used internally (e.g. on project switch) and is unconditional.
  */
 export function clearRun(): void {
   currentRun = null;

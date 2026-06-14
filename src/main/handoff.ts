@@ -66,17 +66,33 @@ function pointerLine(dir: string, docs: string[]): string {
  * compact capsule of the bound issue/task — never the full issue body/comments.
  * The operated project is the repo opened in GodMode, not the GodMode app repo.
  */
-function groundingBlock(run: RunSnapshot | null, projectName: string | undefined, pointers: DocPointers): string {
+function groundingBlock(
+  run: RunSnapshot | null,
+  projectName: string | undefined,
+  pointers: DocPointers,
+  worktreePath: string | undefined,
+): string {
   const project = projectName ? `"${projectName}"` : '(unnamed)';
   const issueNumber = run?.sourceType === 'github_issue' ? run.issueNumber : undefined;
 
   const lines: string[] = [];
   lines.push('== Builder handoff (GodMode) ==');
-  lines.push(
-    `Start a FRESH builder session for the OPERATED PROJECT ${project} — the repo opened in ` +
-      'GodMode and worked on by agents, NOT the GodMode app repo. Your working directory is ' +
-      "that project's root. Read its repo-local sources yourself before implementing:",
-  );
+  if (worktreePath) {
+    lines.push(
+      `Start a FRESH builder session for the OPERATED PROJECT ${project} — the repo opened in ` +
+        'GodMode and worked on by agents, NOT the GodMode app repo. Your working directory is the ' +
+        `run worktree at ${worktreePath} — an isolated git worktree of that operated project, already ` +
+        `checked out on branch "${run?.worktree?.branch ?? run?.branch ?? '(run branch)'}". Commit and push ` +
+        'to that branch (do not create another); the primary checkout is left untouched. Read the project\'s ' +
+        'repo-local sources yourself before implementing:',
+    );
+  } else {
+    lines.push(
+      `Start a FRESH builder session for the OPERATED PROJECT ${project} — the repo opened in ` +
+        'GodMode and worked on by agents, NOT the GodMode app repo. Your working directory is ' +
+        "that project's root. Read its repo-local sources yourself before implementing:",
+    );
+  }
   lines.push('- AGENTS.md — process, authority, and safety rules');
   lines.push('- docs/spec.md — current product/technical spec');
   lines.push(pointerLine('docs/architecture', pointers.architecture));
@@ -136,9 +152,10 @@ function groundingBlock(run: RunSnapshot | null, projectName: string | undefined
 export function composeBuilderHandoff(
   config: GodmodeConfig,
   run: RunSnapshot | null,
-  options: { projectName?: string; docPointers?: Partial<DocPointers> } = {},
+  options: { projectName?: string; docPointers?: Partial<DocPointers>; worktreePath?: string } = {},
 ): BuilderHandoff {
   const projectName = options.projectName;
+  const worktreePath = options.worktreePath;
   const docPointers: DocPointers = {
     architecture: options.docPointers?.architecture ?? [],
     conventions: options.docPointers?.conventions ?? [],
@@ -160,7 +177,7 @@ export function composeBuilderHandoff(
   if (run?.issueTitle) vars.issueTitle = run.issueTitle;
   const { prompt: templatePrompt, missingVariables } = renderTemplate(templates.builder_start, vars);
 
-  const prompt = `${templatePrompt}\n\n${groundingBlock(run, projectName, docPointers)}`;
+  const prompt = `${templatePrompt}\n\n${groundingBlock(run, projectName, docPointers, worktreePath)}`;
 
   const isMock = run === null;
   // The source-type gate is authoritative, NOT just the absence of unbound
@@ -200,6 +217,7 @@ export function composeBuilderHandoff(
     delivery: deliveryFor(mode),
     commandLine,
     prompt,
+    worktreePath,
     missingVariables,
     canSend,
     blockedReason,
@@ -217,6 +235,8 @@ export type ComposeFixOptions = {
   blockersText: string;
   /** Number of accepted blockers; a fix with zero blockers is not sendable. */
   blockerCount: number;
+  /** Run worktree path named as the working root, when the run is isolated (#41). */
+  worktreePath?: string;
 };
 
 /**
@@ -231,16 +251,26 @@ function fixGroundingBlock(
   run: RunSnapshot | null,
   projectName: string | undefined,
   pr: FixPrTarget | undefined,
+  worktreePath: string | undefined,
 ): string {
   const project = projectName ? `"${projectName}"` : '(unnamed)';
   const issueNumber = run?.sourceType === 'github_issue' ? run.issueNumber : undefined;
   const lines: string[] = [];
   lines.push('== Builder fix handoff (GodMode) ==');
-  lines.push(
-    `Continue work on the OPERATED PROJECT ${project} — the repo opened in GodMode, NOT the GodMode ` +
-      "app repo. Your working directory is that project's root. Read its canonical sources and the live " +
-      'PR/review artifacts yourself before changing code:',
-  );
+  if (worktreePath) {
+    lines.push(
+      `Continue work on the OPERATED PROJECT ${project} — the repo opened in GodMode, NOT the GodMode ` +
+        `app repo. Your working directory is the run worktree at ${worktreePath} — an isolated git ` +
+        `worktree of that operated project, on branch "${run?.worktree?.branch ?? run?.branch ?? '(run branch)'}". ` +
+        'Read its canonical sources and the live PR/review artifacts yourself before changing code:',
+    );
+  } else {
+    lines.push(
+      `Continue work on the OPERATED PROJECT ${project} — the repo opened in GodMode, NOT the GodMode ` +
+        "app repo. Your working directory is that project's root. Read its canonical sources and the live " +
+        'PR/review artifacts yourself before changing code:',
+    );
+  }
   lines.push('- AGENTS.md — process, authority, and safety rules');
   lines.push('- docs/spec.md — current product/technical spec');
   if (pr) {
@@ -283,7 +313,7 @@ export function composeFixHandoff(
   run: RunSnapshot | null,
   options: ComposeFixOptions,
 ): BuilderHandoff {
-  const { projectName, pr, blockersText, blockerCount } = options;
+  const { projectName, pr, blockersText, blockerCount, worktreePath } = options;
 
   const builder = buildRoleResolutions(config).find((role) => role.role === 'builder');
   const agentId = builder?.agentId ?? config.roles.builder.agent;
@@ -306,7 +336,7 @@ export function composeFixHandoff(
   if (run?.issueTitle) vars.issueTitle = run.issueTitle;
   const { prompt: templatePrompt, missingVariables } = renderTemplate(templates.builder_fix, vars);
 
-  const prompt = `${templatePrompt}\n\n${fixGroundingBlock(run, projectName, pr)}`;
+  const prompt = `${templatePrompt}\n\n${fixGroundingBlock(run, projectName, pr, worktreePath)}`;
 
   const isMock = run === null || pr === undefined;
   const hasBlockers = blockerCount > 0;
@@ -339,6 +369,7 @@ export function composeFixHandoff(
     delivery: deliveryFor(mode),
     commandLine,
     prompt,
+    worktreePath,
     missingVariables,
     canSend,
     blockedReason,
@@ -383,5 +414,9 @@ export function getCurrentHandoff(run: RunSnapshot | null): BuilderHandoff {
   const loaded = loadConfig();
   const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
   const docPointers = collectDocPointers(getSelectedProjectRoot());
-  return composeBuilderHandoff(config, run, { projectName: loaded.projectName, docPointers });
+  return composeBuilderHandoff(config, run, {
+    projectName: loaded.projectName,
+    docPointers,
+    worktreePath: run?.worktree?.path,
+  });
 }

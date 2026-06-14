@@ -105,7 +105,9 @@ The registry also renders **command templates** for the builder/reviewer lifecyc
 
 ## Role Session Launch
 
-Starting a pane launches the configured agent for that role, not a generic shell. On `godmode:pty:start`, the main process maps the pane/role to its bound agent command via `resolveRoleLaunch` (only `cli` adapters launch in v1; an unconfigured role or non-cli adapter returns a visible reason). The command runs in a `node-pty` session whose working directory is restricted to the selected operated-project root, with the same sanitized/minimal environment as before. The executable is resolved on the safe `PATH` (or against the project root for a path-bearing command) up front, so an invalid/missing command yields a visible error inside the pane rather than a crash. Each pane has start/restart/stop controls — restart reuses start, since launching replaces any live session for that pane. Sessions stop on UI stop, renderer teardown, and app quit. See `docs/architecture/role-session-launch.md`.
+Starting a pane launches the configured agent for that role, not a generic shell. On `godmode:pty:start`, the main process maps the pane/role to its bound agent command via `resolveRoleLaunch` (only `cli` adapters launch in v1; an unconfigured role or non-cli adapter returns a visible reason). The command runs in a `node-pty` session whose working directory is restricted by an allowlist to exactly the selected operated-project root **or** the active run's registered git worktree (issue #41) — nothing else, with anything outside rejected visibly. The same sanitized/minimal environment applies. The executable is resolved on the safe `PATH` (or against the launch directory for a path-bearing command) up front, so an invalid/missing command yields a visible error inside the pane rather than a crash. Each pane has start/restart/stop controls — restart reuses start, since launching replaces any live session for that pane. Sessions stop on UI stop, renderer teardown, and app quit. See `docs/architecture/role-session-launch.md`.
+
+When `workspace.isolation: worktree` is configured (default `shared`), the builder/fix sessions for a run launch in a per-run `git worktree` of the operated project instead of the primary checkout, so an agent switching branches or rewriting files can never collide with the running app's checkout or another session's uncommitted work. Reviewer sessions, GitHub state, and harness detection continue to scope to the operated-project root. See `docs/architecture/run-worktree-isolation.md`.
 
 ## Run State Machine
 
@@ -138,11 +140,19 @@ variables are unresolved. A GitHub issue resolves fully (no leftover
 blocked and the operator routes a vague task to `needs_spec` rather than sending
 it blindly. With no run bound, the preview is clearly labeled mock/demo.
 
+For an isolated run (issue #41), sending the handoff first creates (or reuses, on
+fix cycles) the run-scoped worktree on its branch and names that worktree path as
+the working root in the prompt while still naming the operated project. A worktree
+creation failure is a visible error and the run does not advance as if the handoff
+were ready; the builder PTY must already be running in that worktree (restart the
+pane if it was started before the worktree existed) before the prompt is delivered.
+
 Sending (`godmode:run:handoff:send`) is gated behind an explicit operator
 approval and a live builder session: the approved prompt is written into the
-configured builder PTY (in the operated-project root), a prompt-sent event
-(timestamp, source, single-line digest, length) is recorded in the run's audit
-log, and the run advances to `builder_running`. Reaching `builder_running`
+configured builder PTY (in the operated-project root, or the run worktree when
+isolated), a prompt-sent event (timestamp, source, single-line digest, length) is
+recorded in the run's audit log, and the run advances to `builder_running`.
+Reaching `builder_running`
 records that the prompt was *sent*, never that the task succeeded. See
 `docs/architecture/builder-handoff.md`.
 

@@ -561,6 +561,71 @@ p {
   max-width: 180px;
 }
 
+.agent-worktree {
+  color: #7dd3fc;
+  font-size: 0.6rem;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+/* Run worktree isolation surfaces (issue #41). */
+.run-nudge {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.08);
+  color: var(--text-soft);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.run-nudge button {
+  margin-top: 6px;
+}
+
+.run-worktree-actions {
+  margin: 8px 0;
+}
+
+.run-worktree-message {
+  margin: 6px 0;
+  color: var(--text-soft);
+  font-size: 0.64rem;
+}
+
+.run-orphan-worktrees {
+  margin-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  padding-top: 8px;
+}
+
+.run-orphan-worktrees ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-orphan-worktrees li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.64rem;
+}
+
+.run-orphan-worktrees .orphan-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .config-error {
   margin: 0 0 8px;
   color: #fca5a5;

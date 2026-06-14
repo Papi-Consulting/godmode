@@ -4,9 +4,11 @@ import type {
   AgentRegistryState,
   AppRepoState,
   BuilderHandoff,
+  ClearRunResult,
   GithubIssueDetailResult,
   GithubState,
   HandoffSendResult,
+  ManagedWorktree,
   ProjectConfigState,
   ProjectState,
   ReviewSynthesisResult,
@@ -17,6 +19,8 @@ import type {
   RunSnapshot,
   RunVerificationResult,
   StartReviewersResult,
+  WorkspaceIsolation,
+  WorktreeCleanupResult,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
 
@@ -54,6 +58,13 @@ const api = {
     ipcRenderer.invoke(GODMODE_IPC.runReviewerComment, input) as Promise<ReviewerCommentResult>,
   synthesizeReviews: () => ipcRenderer.invoke(GODMODE_IPC.runSynthesizeReviews) as Promise<ReviewSynthesisResult>,
   sendFix: () => ipcRenderer.invoke(GODMODE_IPC.runSendFix) as Promise<HandoffSendResult>,
+  setRunIsolation: (input: { isolation: WorkspaceIsolation }) =>
+    ipcRenderer.invoke(GODMODE_IPC.runSetIsolation, input) as Promise<
+      { ok: true; run: RunSnapshot } | { ok: false; code: string; error: string; run: RunSnapshot | null }
+    >,
+  listWorktrees: () => ipcRenderer.invoke(GODMODE_IPC.worktreeList) as Promise<ManagedWorktree[]>,
+  cleanupWorktree: (input: { path: string }) =>
+    ipcRenderer.invoke(GODMODE_IPC.worktreeCleanup, input) as Promise<WorktreeCleanupResult>,
   dispatchRun: (input: {
     action: RunAction;
     reason?: string;
@@ -62,7 +73,7 @@ const api = {
     prNumber?: number;
     expectedCommit?: string;
   }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
-  clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<RunSnapshot | null>,
+  clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<ClearRunResult>,
   onProjectChanged: (callback: (state: ProjectState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProjectState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.projectChanged, listener);

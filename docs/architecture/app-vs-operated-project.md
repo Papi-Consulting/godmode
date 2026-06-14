@@ -46,6 +46,21 @@ badge in the project bar. Nothing in the harness/PTY/GitHub paths branches on
 This keeps the two contexts from collapsing into one even when they point at the
 same files.
 
+## A run worktree is the operated project at a different path
+
+When `workspace.isolation: worktree` is enabled (issue #41), a run's builder/fix
+sessions work in a per-run `git worktree` of the operated project rather than the
+primary checkout. That worktree **is** the operated project — same repo, same
+conceptual context — just at a different filesystem path. It therefore extends,
+not violates, the "agent commands run in the operated-project directory" rule: the
+PTY cwd allowlist admits exactly the operated-project root or the active run's
+worktree. Reviewer launches, GitHub state, harness detection, and `gh` calls still
+scope to the operated-project root; only the builder/fix sessions move into the
+worktree. The dogfooding case is exactly where this matters most — the operated
+tree is also the live app/dev-server checkout — so the `isAppRepo` badge drives a
+UI *nudge* to enable isolation, while the worktree behavior itself never branches
+on `isAppRepo`. See `docs/architecture/run-worktree-isolation.md`.
+
 ## Why this matters
 
 If "this repo" were silently treated as "the selected project," then once
