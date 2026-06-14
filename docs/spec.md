@@ -237,8 +237,21 @@ pull request and push to `main`. The resulting GitHub check is neutral,
 per-commit verification evidence: it feeds the commit-verification gate
 (`summarizeChecks` in `src/main/verify.ts`) and the run state machine's
 `tests_failed`/`checks_unstable` blockers, and a local pass never overrides a
-red check on the pushed commit. The live-Electron smoke test (#35) is not part
-of CI yet; wiring it in (via `xvfb-run`) is a follow-up once it exists.
+red check on the pushed commit.
+
+### Live-Electron smoke (`npm run smoke`)
+
+Beyond the CI commands, `npm run smoke` builds the app and launches **real
+Electron** against the production renderer to assert the operator-visible wiring
+end to end (preload `window.godmode` bridge — the #34 regression — project
+selection/harness detection, dogfooding badge, config-derived role panes, GitHub
+`gh_missing` degradation, a fake-CLI PTY in the operated-project root, and
+run/handoff binding). It runs with **fake agents and no network/mutating `gh`
+calls** (the launched app gets an empty PATH so `gh` is deterministically
+absent). It is separate from `npm test` (which stays GUI-free) and is required
+when a change touches preload/IPC/main-process wiring and before any dogfood run.
+Failures drop a screenshot + console log under `.godmode/smoke/` (gitignored).
+The smoke is not part of CI yet; wiring it in (via `xvfb-run`) is a follow-up.
 
 ## Open Questions
 

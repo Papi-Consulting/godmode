@@ -215,6 +215,28 @@ npm run build
 
 If dependencies are not installed yet, run `npm install` first.
 
+`npm test` is GUI-free (unit tests only, `test/*.test.js`); the live-Electron
+smoke is intentionally excluded from it.
+
+### Live-Electron smoke (`npm run smoke`)
+
+```bash
+npm run smoke
+```
+
+Builds the app and launches **real Electron** against the production renderer to
+assert the operator-visible wiring end to end — preload bridge (`window.godmode`,
+the #34 regression), project selection + harness detection, the dogfooding badge,
+config-derived role panes, GitHub `gh_missing` degradation, a fake-CLI PTY
+launching in the operated-project root, and run/handoff binding. It uses **fake
+agents only** and makes **no network/mutating `gh` calls** (the launched app gets
+an empty PATH so `gh` is deterministically absent). It needs a GUI/display, so it
+is not part of `npm test` or CI yet.
+
+Required: when a change touches preload, IPC, or main-process/renderer wiring,
+and as a gate **before any dogfood run**. On failure it writes a screenshot +
+renderer console log to `.godmode/smoke/` (gitignored).
+
 ### Continuous integration
 
 GitHub Actions (`.github/workflows/ci.yml`) runs these same commands on every
