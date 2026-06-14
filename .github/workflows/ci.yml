@@ -1,0 +1,34 @@
+# CI runs the repo's documented verification commands (AGENTS.md "Verification
+# Commands") against the exact pushed commit, producing the GitHub check signal
+# that the commit-verification gate (src/main/verify.ts summarizeChecks) and
+# the run state machine's tests_failed/checks_unstable blockers consume.
+# Agent self-reports are not proof; this check is the neutral evidence.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

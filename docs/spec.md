@@ -229,6 +229,17 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [ ] Automatic review/fix loop.
 - [ ] Dogfood GodMode on itself.
 
+## Continuous Integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the documented verification
+commands (`npm ci`, `npm run typecheck`, `npm test`, `npm run build`) on every
+pull request and push to `main`. The resulting GitHub check is neutral,
+per-commit verification evidence: it feeds the commit-verification gate
+(`summarizeChecks` in `src/main/verify.ts`) and the run state machine's
+`tests_failed`/`checks_unstable` blockers, and a local pass never overrides a
+red check on the pushed commit. The live-Electron smoke test (#35) is not part
+of CI yet; wiring it in (via `xvfb-run`) is a follow-up once it exists.
+
 ## Open Questions
 
 | Question | Status |

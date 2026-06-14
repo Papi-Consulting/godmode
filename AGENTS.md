@@ -205,22 +205,25 @@ Non-blocking preferences should be clearly labeled as non-blocking.
 
 ## Verification Commands
 
-Current scaffold verification:
+Current verification:
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 ```
 
-If dependencies are not installed yet:
+If dependencies are not installed yet, run `npm install` first.
 
-```bash
-npm install
-npm run typecheck
-npm run build
-```
+### Continuous integration
 
-Update this section when the real test suite is added.
+GitHub Actions (`.github/workflows/ci.yml`) runs these same commands on every
+pull request and every push to `main`, publishing the result as a GitHub check
+on the commit. This is the neutral completion evidence the harness requires:
+agent self-reports are not proof, and a local pass in an agent-controlled
+working tree does not override a red check on the pushed commit. A PR with a
+failing CI check is not merge-ready; treat the failure as a blocker to fix, not
+to explain away.
 
 ## Friction Log
 
