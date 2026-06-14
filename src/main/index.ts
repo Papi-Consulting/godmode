@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -297,12 +296,6 @@ async function ensureRunWorktree(
 > {
   if (run.isolation !== 'worktree') return { mode: 'shared' };
 
-  // Reuse an existing worktree when its directory is still present (fix cycles,
-  // or a re-prepare after the builder pane was restarted).
-  if (run.worktree && fs.existsSync(run.worktree.path)) {
-    return { mode: 'worktree', ok: true, worktree: run.worktree };
-  }
-
   const projectRoot = getSelectedProjectRoot();
   if (!(await isGitRepo(projectRoot))) {
     return {
@@ -312,6 +305,13 @@ async function ensureRunWorktree(
     };
   }
 
+  // Reuse the recorded worktree on fix cycles / pane restarts, but NEVER on a
+  // bare directory-exists check: a recorded directory that was manually removed
+  // and recreated, converted to a foreign repo, or moved to the wrong branch after
+  // initial creation must not be returned as valid and launched as the builder
+  // cwd. Routing the recorded plan back through createWorktree runs the full
+  // validateReusableWorktree gate (registered worktree of this repo, on the
+  // expected branch) and surfaces a visible reason on conflict (issue #41).
   const plan = run.worktree
     ? { dir: run.worktree.path, branch: run.worktree.branch }
     : deriveWorktreePlan(projectRoot, run.id);
@@ -323,7 +323,8 @@ async function ensureRunWorktree(
   const worktree: RunWorktree = {
     path: created.dir,
     branch: created.branch,
-    createdAt: new Date().toISOString(),
+    // Preserve the original creation timestamp across validated reuse.
+    createdAt: run.worktree?.createdAt ?? new Date().toISOString(),
   };
   const updated = setCurrentRunWorktree(worktree);
   if (updated) emitRunChanged(updated);

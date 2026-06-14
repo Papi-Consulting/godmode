@@ -173,6 +173,39 @@ test('createWorktree refuses to reuse a foreign git repo squatting at the worktr
   assert.match(reused.error, /not a registered worktree/i);
 });
 
+test('recorded-path reuse (ensureRunWorktree fix-cycle) re-validates instead of trusting the dir exists', async () => {
+  // Regression for the ensureRunWorktree blocker (PR #51): a run that already has
+  // a recorded worktree must NOT be reused on a bare directory-exists check.
+  // ensureRunWorktree now routes the recorded {dir, branch} back through
+  // createWorktree, so a recorded directory that was tampered with after initial
+  // creation is rejected with a visible reason rather than launched as the cwd.
+  const root = makeGitProject();
+  const plan = deriveWorktreePlan(root, 'run-recorded-reuse-1');
+
+  // Initial creation records this {dir, branch} on the run.
+  const first = await createWorktree({ projectRoot: root, dir: plan.dir, branch: plan.branch });
+  assert.equal(first.ok, true);
+  const recorded = { dir: first.dir, branch: first.branch };
+
+  // A still-valid recorded worktree reuses cleanly (the happy fix-cycle path).
+  const happy = await createWorktree({ projectRoot: root, dir: recorded.dir, branch: recorded.branch });
+  assert.equal(happy.ok, true, JSON.stringify(happy));
+  assert.equal(happy.reused, true);
+
+  // Now tamper after initial creation: deregister + remove the worktree, then
+  // recreate a plain (non-worktree) directory squatting at the recorded path —
+  // exactly the "manually removed/recreated" case the reviewer flagged.
+  await removeWorktree({ projectRoot: root, dir: recorded.dir });
+  git(root, ['worktree', 'prune']);
+  fs.mkdirSync(recorded.dir, { recursive: true });
+  fs.writeFileSync(path.join(recorded.dir, 'leftover.txt'), 'tampered\n');
+
+  // The recorded-path reuse must now FAIL visibly, not return the stale dir.
+  const reused = await createWorktree({ projectRoot: root, dir: recorded.dir, branch: recorded.branch });
+  assert.equal(reused.ok, false, JSON.stringify(reused));
+  assert.match(reused.error, /not a git worktree/i);
+});
+
 test('inspectWorktree reports clean, then unpushed, then dirty', async () => {
   const root = makeGitProject();
   const plan = deriveWorktreePlan(root, 'run-clean-1');
