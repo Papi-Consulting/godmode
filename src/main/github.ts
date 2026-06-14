@@ -471,6 +471,13 @@ export type CommitVerificationOptions = {
    * operated project's local `HEAD` is used as the fallback.
    */
   expectedCommit?: string;
+  /**
+   * The run's working branch to verify against (issue #41). When a run is isolated
+   * in a worktree the primary checkout stays on its own branch, so the branch
+   * cannot be read from the project root — the caller passes the run's branch.
+   * When omitted, the operated project's current branch is used (shared behavior).
+   */
+  branch?: string;
 };
 
 /**
@@ -536,7 +543,9 @@ export async function getCommitVerification(
 ): Promise<CommitVerification> {
   const cwd = path.resolve(projectRoot);
 
-  const branch = await currentBranch(cwd);
+  // A run-recorded branch wins (issue #41: an isolated run's branch lives in its
+  // worktree, not the primary checkout); otherwise read the project's current branch.
+  const branch = options.branch ?? (await currentBranch(cwd));
 
   // Run-recorded commit wins; otherwise fall back to the operated project's
   // local HEAD. The source is surfaced so the operator can see what was checked.

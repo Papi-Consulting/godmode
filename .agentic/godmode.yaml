@@ -13,6 +13,14 @@ harness:
   review_dir: docs/review
   friction_dir: docs/friction
 
+# Workspace isolation for builder/fix sessions (issue #41).
+#   shared   - builder works directly in the operated-project checkout (default).
+#   worktree - each run gets its own git worktree (sibling .godmode-worktrees/),
+#              so an agent can't disturb the running app's checkout. Recommended
+#              for dogfooding; see docs/architecture/run-worktree-isolation.md.
+workspace:
+  isolation: shared
+
 roles:
   head:
     agent: hermes

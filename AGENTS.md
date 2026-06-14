@@ -189,7 +189,7 @@ Non-blocking preferences should be clearly labeled as non-blocking.
 - No production deploy automation in v1.
 - No auto-merge to main in v1.
 - No credential scraping from local env files or unrelated profiles.
-- Agent commands must run inside the selected operated-project directory (not the GodMode app repo) unless explicitly configured otherwise.
+- Agent commands must run inside the selected operated-project directory (not the GodMode app repo) unless explicitly configured otherwise. A run-scoped `git worktree` of the operated project (`workspace.isolation: worktree`, issue #41) counts as the operated project — same repo, same conceptual context, a different path — so a builder/fix session launching there satisfies this rule. The PTY cwd allowlist admits exactly the operated-project root or the active run's registered worktree, nothing else. See `docs/architecture/run-worktree-isolation.md`.
 - Destructive git actions require explicit human approval.
 - Preserve user control: pause/cancel/override must be possible for long-running agent sessions.
 

@@ -1,4 +1,11 @@
-import type { RunAction, RunBlockerKind, RunSnapshot, RunStatus } from '../../shared/types.js';
+import type {
+  ManagedWorktree,
+  RunAction,
+  RunBlockerKind,
+  RunSnapshot,
+  RunStatus,
+  WorkspaceIsolation,
+} from '../../shared/types.js';
 
 /** Human labels for each run status. Display-only; the status key is canonical. */
 export const STATUS_LABEL: Record<RunStatus, string> = {
@@ -93,12 +100,34 @@ export type RunDispatchOptions = {
   prNumber?: number;
 };
 
+// Statuses from which the operator may still flip a run's isolation (mirrors
+// ISOLATION_TOGGLE_STATUSES in src/main/index.ts, the authoritative guard).
+const ISOLATION_TOGGLE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'issue_selected',
+  'needs_spec',
+  'ready_to_build',
+]);
+
+// Terminal run statuses; mirrors TERMINAL_STATUSES in src/main/run.ts. Current-run
+// worktree cleanup is only offered once the run is finished.
+const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['closed', 'cancelled', 'karan_merged']);
+
 type RunControlPaneProps = {
   run: RunSnapshot | null;
   /** Most recent rejected-action message, surfaced inline. */
   error: string | null;
   onDispatch: (action: RunAction, options?: RunDispatchOptions) => void;
   onClear: () => void;
+  /** True when the operated project is the GodMode app repo (dogfooding nudge, #41). */
+  isAppRepo: boolean;
+  /** Toggle the run's workspace isolation (the dogfooding nudge's one-click enable). */
+  onSetIsolation: (isolation: WorkspaceIsolation) => void;
+  /** GodMode-managed worktrees for the project, for orphan cleanup (#41). */
+  orphanWorktrees: ManagedWorktree[];
+  /** Remove a managed worktree by path (current-run or orphaned). */
+  onCleanupWorktree: (path: string) => void;
+  /** Last worktree action message (cleanup refusal/success), surfaced inline. */
+  worktreeMessage: string | null;
 };
 
 function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
@@ -117,8 +146,24 @@ function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
   }
 }
 
-export function RunControlPane({ run, error, onDispatch, onClear }: RunControlPaneProps) {
+export function RunControlPane({
+  run,
+  error,
+  onDispatch,
+  onClear,
+  isAppRepo,
+  onSetIsolation,
+  orphanWorktrees,
+  onCleanupWorktree,
+  worktreeMessage,
+}: RunControlPaneProps) {
   const lastTransition = run && run.log.length > 0 ? run.log[run.log.length - 1] : null;
+  const canToggleIsolation = run !== null && ISOLATION_TOGGLE_STATUSES.has(run.status);
+  const showDogfoodNudge = isAppRepo && run !== null && run.isolation === 'shared' && canToggleIsolation;
+  const runIsTerminal = run !== null && TERMINAL_RUN_STATUSES.has(run.status);
+  // Orphans = managed worktrees not belonging to the active run (the current run's
+  // worktree gets its own cleanup affordance below).
+  const orphans = orphanWorktrees.filter((wt) => !wt.isCurrentRun);
 
   return (
     <section className="stack-section run-control" aria-label="Run control">
@@ -156,7 +201,49 @@ export function RunControlPane({ run, error, onDispatch, onClear }: RunControlPa
                 <dt>PR</dt>
                 <dd>{run.prNumber !== undefined ? `#${run.prNumber}` : '—'}</dd>
               </div>
+              <div>
+                <dt>Isolation</dt>
+                <dd>{run.isolation === 'worktree' ? 'worktree' : 'shared checkout'}</dd>
+              </div>
+              <div>
+                <dt>Worktree</dt>
+                <dd title={run.worktree?.path ?? undefined}>
+                  {run.worktree ? run.worktree.path : run.isolation === 'worktree' ? 'pending' : '—'}
+                </dd>
+              </div>
             </dl>
+
+            {showDogfoodNudge ? (
+              <p className="run-nudge" role="status">
+                Dogfooding GodMode on its own repo — enable a per-run git worktree so the builder can’t
+                disturb the running app’s checkout.{' '}
+                <button className="primary-action" onClick={() => onSetIsolation('worktree')}>
+                  Enable worktree for this run
+                </button>
+              </p>
+            ) : null}
+
+            {run.worktree ? (
+              <div className="run-worktree-actions">
+                <button
+                  onClick={() => onCleanupWorktree(run.worktree!.path)}
+                  disabled={!runIsTerminal}
+                  title={
+                    runIsTerminal
+                      ? 'Remove the run worktree (refused if dirty or unpushed)'
+                      : 'Available once the run is closed, cancelled, or merged'
+                  }
+                >
+                  Clean up worktree
+                </button>
+              </div>
+            ) : null}
+
+            {worktreeMessage ? (
+              <p className="run-worktree-message" role="status">
+                {worktreeMessage}
+              </p>
+            ) : null}
 
             {run.reason || run.blocker ? (
               <p className={`run-reason ${statusTone(run.status) || 'warn'}`} role="status">
@@ -210,6 +297,28 @@ export function RunControlPane({ run, error, onDispatch, onClear }: RunControlPa
             ) : null}
           </div>
         )}
+
+        {orphans.length > 0 ? (
+          <div className="run-orphan-worktrees" aria-label="Orphaned worktrees">
+            <span className="section-kicker">Orphaned worktrees</span>
+            <ul>
+              {orphans.map((wt) => (
+                <li key={wt.path}>
+                  <span className="orphan-path" title={wt.path}>
+                    {wt.branch ?? wt.path.split('/').pop()}
+                  </span>
+                  <button
+                    onClick={() => onCleanupWorktree(wt.path)}
+                    disabled={!wt.cleanliness.clean}
+                    title={wt.cleanliness.clean ? 'Remove this worktree' : wt.cleanliness.reasons.join(' ')}
+                  >
+                    {wt.cleanliness.clean ? 'Remove' : 'Dirty'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     </section>
   );

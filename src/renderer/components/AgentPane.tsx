@@ -11,9 +11,11 @@ type AgentPaneProps = {
   phase: string;
   accent: string;
   roleDoc?: string;
+  /** Run worktree path the session launches in, when the run is isolated (#41). */
+  worktreePath?: string;
 };
 
-export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc }: AgentPaneProps) {
+export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc, worktreePath }: AgentPaneProps) {
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -43,6 +45,7 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
     term.writeln(`$ ${commandHint}`);
     term.writeln(`phase=${phase} adapter=cli`);
     if (roleDoc) term.writeln(`role-doc=${roleDoc}`);
+    if (worktreePath) term.writeln(`worktree=${worktreePath}`);
     term.writeln('');
 
     terminalRef.current = term;
@@ -78,7 +81,7 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
       term.dispose();
       terminalRef.current = null;
     };
-  }, [agent, commandHint, id, phase, role, roleDoc]);
+  }, [agent, commandHint, id, phase, role, roleDoc, worktreePath]);
 
   async function start() {
     setStatus('running');
@@ -112,6 +115,11 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
           {roleDoc ? (
             <span className="agent-doc" title={roleDoc}>
               {roleDoc}
+            </span>
+          ) : null}
+          {worktreePath ? (
+            <span className="agent-worktree" title={`Run worktree · ${worktreePath}`}>
+              ⑂ {worktreePath.split('/').pop()}
             </span>
           ) : null}
         </div>

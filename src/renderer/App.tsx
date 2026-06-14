@@ -4,11 +4,14 @@ import type {
   AgentRole,
   BuilderHandoff,
   CommitVerification,
+  ManagedWorktree,
   ProjectConfigState,
+  ProjectState,
   RolePaneConfig,
   RunAction,
   RunSnapshot,
   RunStatus,
+  WorkspaceIsolation,
 } from '../shared/types.js';
 import { AgentPane } from './components/AgentPane.js';
 import { CommandPreviewPane } from './components/CommandPreviewPane.js';
@@ -71,6 +74,9 @@ const chatEvents = [
 export function App() {
   const [config, setConfig] = useState<ProjectConfigState | null>(null);
   const [appRepo, setAppRepo] = useState<AppRepoState | null>(null);
+  const [project, setProject] = useState<ProjectState | null>(null);
+  const [worktrees, setWorktrees] = useState<ManagedWorktree[]>([]);
+  const [worktreeMessage, setWorktreeMessage] = useState<string | null>(null);
   const [run, setRun] = useState<RunSnapshot | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -156,6 +162,36 @@ export function App() {
     setFixHandoff(null);
     setSynthError(null);
   }, []);
+
+  // Refresh the operated project's GodMode-managed worktrees (for orphan cleanup).
+  const refreshWorktrees = useCallback(async () => {
+    if (!window.godmode) return;
+    const list = await window.godmode.listWorktrees();
+    setWorktrees(list ?? []);
+  }, []);
+
+  // Flip the run's workspace isolation (the dogfooding nudge's one-click enable).
+  const setIsolation = useCallback(async (isolation: WorkspaceIsolation) => {
+    if (!window.godmode) return;
+    const seq = (runRequestSeq.current += 1);
+    const result = await window.godmode.setRunIsolation({ isolation });
+    if (seq !== runRequestSeq.current) return;
+    if (result.run) setRun(result.run);
+    setWorktreeMessage(result.ok ? null : result.error);
+  }, []);
+
+  // Remove a managed worktree (current-run or orphaned). Main refuses dirty/unpushed
+  // trees and the active run's worktree until the run is terminal, with a reason.
+  const cleanupWorktree = useCallback(
+    async (worktreePath: string) => {
+      if (!window.godmode) return;
+      const result = await window.godmode.cleanupWorktree({ path: worktreePath });
+      setWorktreeMessage(result.ok ? `Removed worktree ${result.removedPath}.` : result.error);
+      await refreshWorktrees();
+      void refreshRun();
+    },
+    [refreshWorktrees, refreshRun],
+  );
 
   // Run the branch/PR/commit verification evidence gate. Main reads live
   // `gh`/`git` state (never agent self-report), records the result on the current
@@ -248,6 +284,28 @@ export function App() {
     };
   }, []);
 
+  // Track the operated project (for the dogfooding `isAppRepo` nudge) and its
+  // managed worktrees (orphan cleanup), refreshing both when the project changes.
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      void window.godmode?.getProject().then((state) => {
+        if (active && state) setProject(state);
+      });
+      void refreshWorktrees();
+    };
+    load();
+    const off = window.godmode?.onProjectChanged((state) => {
+      if (active && state) setProject(state);
+      setWorktreeMessage(null);
+      load();
+    });
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, [refreshWorktrees]);
+
   useEffect(() => {
     void refreshRun();
     // A run is scoped to its operated project; main discards it on project
@@ -273,12 +331,14 @@ export function App() {
     const offRun = window.godmode?.onRunChanged((next) => {
       runRequestSeq.current += 1;
       setRun(next ?? null);
+      // A run change may have created/cleared the run worktree — refresh the list.
+      void refreshWorktrees();
     });
     return () => {
       offProject?.();
       offRun?.();
     };
-  }, [refreshRun]);
+  }, [refreshRun, refreshWorktrees]);
 
   useEffect(() => {
     let active = true;
@@ -303,6 +363,8 @@ export function App() {
     roleDoc: pane.roleDoc,
     phase: PHASE_BY_PANE[pane.paneId] ?? 'idle',
     accent: ACCENT_BY_PANE[pane.paneId] ?? 'blue',
+    // The builder is the only isolated role: surface its run worktree in the header.
+    worktreePath: pane.paneId === 'builder' ? run?.worktree?.path : undefined,
   }));
   const bindingSummary = rolePanes.map((pane) => `${pane.paneId}: ${pane.agentId}`).join(' · ');
 
@@ -443,7 +505,17 @@ export function App() {
                 onSend={sendHandoff}
                 sendError={sendError}
               />
-              <RunControlPane run={run} error={runError} onDispatch={dispatchRun} onClear={clearRun} />
+              <RunControlPane
+                run={run}
+                error={runError}
+                onDispatch={dispatchRun}
+                onClear={clearRun}
+                isAppRepo={project?.isAppRepo ?? false}
+                onSetIsolation={setIsolation}
+                orphanWorktrees={worktrees}
+                onCleanupWorktree={cleanupWorktree}
+                worktreeMessage={worktreeMessage}
+              />
               <VerificationPane
                 verification={verification}
                 loading={verifying}

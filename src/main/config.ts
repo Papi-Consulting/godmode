@@ -7,6 +7,7 @@ import type {
   ConfigStatus,
   ProjectConfigState,
   RolePaneConfig,
+  WorkspaceIsolation,
 } from '../shared/types.js';
 import { getSelectedProjectRoot } from './project.js';
 
@@ -68,6 +69,16 @@ const godmodeConfigSchema = z
       })
       .optional(),
     harness: z.record(z.string(), z.string()).optional(),
+    /**
+     * Workspace isolation for builder/fix sessions (issue #41). Default `shared`
+     * (today's behavior) for one release of soak time; `worktree` gives each run
+     * its own git worktree of the operated project.
+     */
+    workspace: z
+      .object({
+        isolation: z.enum(['worktree', 'shared']).optional(),
+      })
+      .optional(),
     roles: z.object({
       head: headSchema,
       builder: builderSchema,
@@ -104,6 +115,15 @@ const godmodeConfigSchema = z
   });
 
 export type GodmodeConfig = z.infer<typeof godmodeConfigSchema>;
+
+/**
+ * Resolve the effective workspace isolation for a config (issue #41). Defaults to
+ * `shared` when no `workspace.isolation` is set, preserving today's behavior so a
+ * project must opt in to per-run worktrees.
+ */
+export function resolveWorkspaceIsolation(config: GodmodeConfig): WorkspaceIsolation {
+  return config.workspace?.isolation === 'worktree' ? 'worktree' : 'shared';
+}
 
 /**
  * Safe defaults used when no config file exists or a present file fails
