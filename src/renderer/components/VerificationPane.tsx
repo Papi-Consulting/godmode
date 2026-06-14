@@ -28,6 +28,7 @@ function statusTone(status: CommitVerificationStatus): string {
 
 const SOURCE_LABEL: Record<ExpectedCommitSource, string> = {
   run_recorded: 'run-recorded',
+  branch_tip: 'branch tip',
   local_head: 'local HEAD',
   unknown: 'unresolved',
 };

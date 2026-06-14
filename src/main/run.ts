@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  ClearRunResult,
   CommitVerification,
   RunAction,
   RunActionResult,
@@ -618,9 +619,49 @@ export function setCurrentRunWorktree(worktree: RunWorktree | null, now?: string
 }
 
 /**
+ * Decide whether the operator's "Clear run" request is allowed (issue #41).
+ * Clearing drops the run record, so it must not strand the run's worktree or a
+ * live builder session with nothing tracking them: it is refused while the run is
+ * still active (non-terminal), still owns a worktree (clean it up first), or has a
+ * live builder PTY (stop it first). Pure — the caller supplies the live-session
+ * flag and performs the actual {@link clearRun} only when this returns `ok`.
+ */
+export function evaluateClearRun(
+  run: RunSnapshot | null,
+  hasLiveBuilderSession: boolean,
+): ClearRunResult {
+  if (run) {
+    if (!isTerminalStatus(run.status)) {
+      return {
+        ok: false,
+        run,
+        error: `The run is still active (${run.status}). Cancel or close it before clearing, so its worktree and sessions are cleaned up first.`,
+      };
+    }
+    if (run.worktree) {
+      return {
+        ok: false,
+        run,
+        error: 'This run still has a git worktree. Clean it up via the worktree controls before clearing the run.',
+      };
+    }
+    if (hasLiveBuilderSession) {
+      return {
+        ok: false,
+        run,
+        error: 'The builder session is still running. Stop it before clearing the run.',
+      };
+    }
+  }
+  return { ok: true, run: null };
+}
+
+/**
  * Discard the current run entirely (the "cleared" outcome): the dashboard returns
  * to a no-run state. Distinct from the `close` action, which records a terminal
- * `closed` status while keeping the run and its log visible.
+ * `closed` status while keeping the run and its log visible. The operator-facing
+ * guard ({@link evaluateClearRun}) lives in the IPC handler; this low-level reset
+ * is also used internally (e.g. on project switch) and is unconditional.
  */
 export function clearRun(): void {
   currentRun = null;

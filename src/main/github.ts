@@ -187,6 +187,32 @@ async function headCommit(cwd: string): Promise<string | null> {
   }
 }
 
+/**
+ * Resolve the tip commit of a local branch, or null when it can't be read (the
+ * branch does not exist locally, not a git repo). Used as the "expected commit"
+ * for an isolated run (issue #41): the run's working branch lives on the worktree,
+ * so the primary checkout's `HEAD` is the wrong thing to verify — the branch tip is
+ * correct for both shared and worktree runs. Read-only.
+ */
+async function branchCommit(cwd: string, branch: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
+      {
+        cwd,
+        env: buildGithubEnv(),
+        timeout: COMMAND_TIMEOUT_MS,
+        maxBuffer: MAX_BUFFER,
+      },
+    );
+    const sha = stdout.trim();
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 type RawLabel = { name?: string; color?: string };
 
 function mapLabels(labels: RawLabel[] | undefined): { name: string; color: string }[] {
@@ -547,13 +573,26 @@ export async function getCommitVerification(
   // worktree, not the primary checkout); otherwise read the project's current branch.
   const branch = options.branch ?? (await currentBranch(cwd));
 
-  // Run-recorded commit wins; otherwise fall back to the operated project's
-  // local HEAD. The source is surfaced so the operator can see what was checked.
+  // Run-recorded commit wins. Otherwise resolve the tip of the run's working
+  // branch (issue #41): in worktree mode the primary checkout intentionally stays
+  // on another branch, so `git rev-parse HEAD` from the project root would verify
+  // the wrong commit and could reject a valid PR as missing_remote_commit. The
+  // branch tip is correct for both shared and worktree runs (in shared mode it *is*
+  // HEAD). Only when no branch is known, or its tip is unreadable, do we fall back
+  // to local HEAD. The source is surfaced so the operator can see what was checked.
   let expectedCommit: string | null;
   let expectedCommitSource: ExpectedCommitSource;
   if (options.expectedCommit) {
     expectedCommit = options.expectedCommit;
     expectedCommitSource = 'run_recorded';
+  } else if (branch) {
+    expectedCommit = await branchCommit(cwd, branch);
+    if (expectedCommit) {
+      expectedCommitSource = 'branch_tip';
+    } else {
+      expectedCommit = await headCommit(cwd);
+      expectedCommitSource = expectedCommit ? 'local_head' : 'unknown';
+    }
   } else {
     expectedCommit = await headCommit(cwd);
     expectedCommitSource = expectedCommit ? 'local_head' : 'unknown';

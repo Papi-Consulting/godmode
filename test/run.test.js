@@ -12,6 +12,7 @@ import {
   computeAvailableActions,
   createRun,
   dispatchRunAction,
+  evaluateClearRun,
   getCurrentRun,
   recordCurrentRunPrompt,
   recordCurrentRunVerification,
@@ -372,6 +373,38 @@ test('controller: selectIssueRun, dispatchRunAction, and clearRun', () => {
 
   clearRun();
   assert.equal(getCurrentRun(), null);
+});
+
+test('evaluateClearRun guards clear as a terminal-only operation (issue #41)', () => {
+  // No run: clearing is always allowed.
+  assert.deepEqual(evaluateClearRun(null, false), { ok: true, run: null });
+
+  // Active (non-terminal) run: refused, run preserved.
+  const active = createRun({ issueNumber: 41, now: NOW, id: 'run-clear-active' });
+  const activeSelected = applyAction(active, 'select_issue', { now: NOW }).run;
+  const refusedActive = evaluateClearRun(activeSelected, false);
+  assert.equal(refusedActive.ok, false);
+  assert.equal(refusedActive.run, activeSelected);
+  assert.match(refusedActive.error, /still active/i);
+
+  // Terminal run with a lingering worktree: refused until cleanup.
+  const terminal = applyAction(activeSelected, 'cancel', { now: NOW, reason: 'done' }).run;
+  assert.equal(terminal.status, 'cancelled');
+  const withWorktree = {
+    ...terminal,
+    worktree: { path: '/tmp/.godmode-worktrees/p-run', branch: 'godmode/run', createdAt: NOW },
+  };
+  const refusedWorktree = evaluateClearRun(withWorktree, false);
+  assert.equal(refusedWorktree.ok, false);
+  assert.match(refusedWorktree.error, /worktree/i);
+
+  // Terminal, no worktree, but a live builder session: refused.
+  const refusedPty = evaluateClearRun(terminal, true);
+  assert.equal(refusedPty.ok, false);
+  assert.match(refusedPty.error, /builder session/i);
+
+  // Terminal, no worktree, no live session: cleared.
+  assert.deepEqual(evaluateClearRun(terminal, false), { ok: true, run: null });
 });
 
 test('createRun initializes an empty verification history', () => {

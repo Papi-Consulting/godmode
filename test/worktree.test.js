@@ -127,6 +127,52 @@ test('createWorktree makes a worktree on its branch and leaves the primary check
   assert.equal(again.reused, true);
 });
 
+test('createWorktree refuses to reuse a stale/non-worktree directory at the worktree path', async () => {
+  const root = makeGitProject();
+  const plan = deriveWorktreePlan(root, 'run-stale-1');
+
+  // A plain (non-git) directory squatting at the worktree path must NOT be
+  // accepted as a valid run worktree and launched as the builder cwd.
+  fs.mkdirSync(plan.dir, { recursive: true });
+  fs.writeFileSync(path.join(plan.dir, 'leftover.txt'), 'stale\n');
+
+  const reused = await createWorktree({ projectRoot: root, dir: plan.dir, branch: plan.branch });
+  assert.equal(reused.ok, false, JSON.stringify(reused));
+  assert.match(reused.error, /not a git worktree/i);
+});
+
+test('createWorktree refuses to reuse a worktree checked out on the wrong branch', async () => {
+  const root = makeGitProject();
+  const plan = deriveWorktreePlan(root, 'run-wrong-branch-1');
+
+  // Create a real, registered worktree at the path but on a different branch than
+  // the run expects — a conflict the operator must resolve, not silently launch.
+  git(root, ['worktree', 'add', '-b', 'someone-elses-branch', plan.dir]);
+
+  const reused = await createWorktree({ projectRoot: root, dir: plan.dir, branch: plan.branch });
+  assert.equal(reused.ok, false, JSON.stringify(reused));
+  assert.match(reused.error, /branch/i);
+});
+
+test('createWorktree refuses to reuse a foreign git repo squatting at the worktree path', async () => {
+  const root = makeGitProject();
+  const plan = deriveWorktreePlan(root, 'run-foreign-1');
+
+  // A standalone git repo at the path, even on a same-named branch, is not a
+  // registered worktree of the operated repo and must be rejected.
+  fs.mkdirSync(plan.dir, { recursive: true });
+  git(plan.dir, ['init', '-b', plan.branch]);
+  git(plan.dir, ['config', 'user.email', 'x@example.com']);
+  git(plan.dir, ['config', 'user.name', 'X']);
+  fs.writeFileSync(path.join(plan.dir, 'f.txt'), 'foreign\n');
+  git(plan.dir, ['add', '.']);
+  git(plan.dir, ['commit', '-m', 'foreign']);
+
+  const reused = await createWorktree({ projectRoot: root, dir: plan.dir, branch: plan.branch });
+  assert.equal(reused.ok, false, JSON.stringify(reused));
+  assert.match(reused.error, /not a registered worktree/i);
+});
+
 test('inspectWorktree reports clean, then unpushed, then dirty', async () => {
   const root = makeGitProject();
   const plan = deriveWorktreePlan(root, 'run-clean-1');

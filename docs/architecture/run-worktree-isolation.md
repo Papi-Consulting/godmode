@@ -52,8 +52,14 @@ shell, bounded timeout/buffer) and never throws — every failure folds into a t
    first use creates the worktree on its branch (`git worktree add -b`), records it
    on the run (`RunSnapshot.worktree` + the working `branch`), and emits the
    change; later calls (fix cycles, a re-prepare after a pane restart) reuse the
-   same dir/branch. Failure (not a git repo, branch checked out elsewhere) is a
-   **visible error** and the run does not advance as if the handoff were ready.
+   same dir/branch. A reuse is accepted only after `createWorktree` proves the
+   existing directory is a **registered worktree of the operated repo on the
+   expected branch** (`git rev-parse --is-inside-work-tree`, its HEAD branch equals
+   the run branch, and it appears in `git worktree list`); a stale/partial/manual
+   directory squatting at the path is rejected so it is never launched as the
+   builder cwd. Failure (not a git repo, branch checked out elsewhere, stale reuse
+   dir) is a **visible error** and the run does not advance as if the handoff were
+   ready.
 2. **Launch.** The builder PTY launches with the worktree as cwd; every other pane
    (head, reviewers) stays in the operated-project root. `openPtySession` enforces
    the cwd allowlist below and records the launch cwd per pane.
@@ -78,9 +84,15 @@ under isolation.
 An isolated run's working branch lives in the worktree, so the primary checkout
 stays on its own branch. The commit-verification gate (#9) therefore accepts an
 explicit `branch` (the run's recorded branch) when the run is isolated, instead of
-reading the current branch of the project root. `gh`/`git` still run in the
-operated-project root — only the branch being queried changes. Reviewer launches,
-GitHub state, and harness detection are unchanged.
+reading the current branch of the project root. When no commit was recorded from
+the builder phase, the expected commit is resolved from the **tip of that branch**
+(`git rev-parse refs/heads/<branch>`, source `branch_tip`) — *not* the primary
+checkout's `HEAD`, which in worktree mode points at an unrelated branch and would
+falsely reject a valid PR as `missing_remote_commit`. The local-`HEAD` fallback
+(`local_head`) is used only when no branch is resolvable (e.g. a detached primary
+checkout). `gh`/`git` still run in the operated-project root — only the branch/ref
+being resolved changes. Reviewer launches, GitHub state, and harness detection are
+unchanged.
 
 ## Cleanup policy
 
@@ -97,6 +109,13 @@ and `godmode:worktree:cleanup` (remove by path). Rules:
   (with the reason), and `git worktree remove` runs without `--force` as a backstop.
 - **Orphans:** on app start / project select the dashboard lists managed worktrees
   for the project and offers cleanup under the same dirty-check rules.
+- **Clearing a run is guarded** (`godmode:run:clear` → `evaluateClearRun`).
+  Discarding the run record is refused while the run is still active (non-terminal),
+  while it still owns a worktree, or while a live builder PTY exists — otherwise the
+  worktree/session would be orphaned with no run protecting it from cleanup. The
+  operator is routed through cancel/close and worktree cleanup first; the run record
+  is preserved until then. (The internal `clearRun` reset used on project switch is
+  unconditional — it tears down PTYs in the same step.)
 
 ## Key code
 

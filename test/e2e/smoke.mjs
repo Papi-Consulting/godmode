@@ -303,6 +303,9 @@ async function run() {
     // variables. gh is absent so the issue detail degrades, but the run is still
     // created and the handoff template resolves (issueNumber/issueTitle bound).
     const issue = await page.evaluate(async () => {
+      // Clear is guarded terminal-only (issue #41): route the active manual run
+      // through cancel (a terminal status) before clearing it.
+      await window.godmode.dispatchRun({ action: 'cancel', reason: 'smoke reset' });
       await window.godmode.clearRun();
       const result = await window.godmode.selectIssueRun({ issueNumber: 4242, issueTitle: 'Smoke fixture issue' });
       const h = await window.godmode.getHandoff();
@@ -313,7 +316,11 @@ async function run() {
     assert.deepEqual(issue.missing, [], 'An issue handoff should leave no unresolved template variables.');
     assert.equal(issue.canSend, true, 'An issue handoff with resolved variables should be sendable.');
     log('✓ [8b] issue run binds a handoff whose template variables resolve.');
-    await page.evaluate(() => window.godmode.clearRun());
+    await page.evaluate(async () => {
+      // Guarded clear (issue #41): cancel the active issue run, then clear it.
+      await window.godmode.dispatchRun({ action: 'cancel', reason: 'smoke reset' });
+      await window.godmode.clearRun();
+    });
 
     // --- Assertion 3 (negative): non-harness dir → missing --------------------
     await page.fill('input[aria-label="Project path"]', nonHarnessDir);

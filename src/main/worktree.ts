@@ -157,11 +157,59 @@ export type CreateWorktreeResult =
   | { ok: false; error: string };
 
 /**
+ * Validate that an already-existing target directory is genuinely a registered
+ * git worktree of the operated repo, checked out on the expected run branch — so a
+ * stale/partial/manual directory at the worktree path is never accepted and then
+ * launched as the builder cwd (which would also weaken the PTY cwd allowlist). All
+ * three conditions must hold: it is inside a git work tree, its HEAD branch equals
+ * the expected branch, and it appears in the operated repo's `git worktree list`.
+ * Any failure returns a visible reason so the UI surfaces the conflict.
+ */
+async function validateReusableWorktree(
+  projectRoot: string,
+  dir: string,
+  branch: string,
+): Promise<GitErr | { ok: true }> {
+  const inside = await runGit(['rev-parse', '--is-inside-work-tree'], dir);
+  if (!inside.ok || inside.stdout.trim() !== 'true') {
+    return {
+      ok: false,
+      error: `A directory already exists at ${dir} but it is not a git worktree. Remove or rename it, then retry.`,
+    };
+  }
+
+  const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], dir);
+  const actualBranch = head.ok ? head.stdout.trim() : '';
+  if (actualBranch !== branch) {
+    return {
+      ok: false,
+      error: `The worktree at ${dir} is on branch "${actualBranch || 'unknown'}" but the run expects "${branch}". Resolve the conflict before launching.`,
+    };
+  }
+
+  const list = await runGit(['worktree', 'list', '--porcelain'], projectRoot);
+  if (!list.ok) {
+    return { ok: false, error: `Could not verify the worktree against the operated repository: ${list.error}` };
+  }
+  const registered = parseWorktreeList(list.stdout).some((entry) => canonical(entry.path) === canonical(dir));
+  if (!registered) {
+    return {
+      ok: false,
+      error: `The directory at ${dir} is not a registered worktree of the operated repository. Resolve the conflict before launching.`,
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
  * Create (or idempotently reuse) a run worktree on its branch. If the directory
- * already exists it is reused; otherwise `git worktree add` runs — creating the
- * branch with `-b` when it does not yet exist, or attaching to the existing branch
- * on a fix-cycle reuse. Never throws; a failure (not a git repo, branch checked
- * out elsewhere, dir conflict) returns a visible reason.
+ * already exists it is reused **only after** {@link validateReusableWorktree}
+ * proves it is a registered worktree of this repo on the expected branch;
+ * otherwise `git worktree add` runs — creating the branch with `-b` when it does
+ * not yet exist, or attaching to the existing branch on a fix-cycle reuse. Never
+ * throws; a failure (not a git repo, branch checked out elsewhere, dir conflict,
+ * stale/foreign reuse dir) returns a visible reason.
  */
 export async function createWorktree(input: {
   projectRoot: string;
@@ -172,8 +220,12 @@ export async function createWorktree(input: {
   const dir = path.resolve(input.dir);
 
   if (fs.existsSync(dir)) {
-    // Reuse: the run already has this worktree (fix cycle, or a re-prepare after
-    // the builder pane was restarted).
+    // Reuse path (fix cycle, or a re-prepare after the builder pane was
+    // restarted): accept the directory only when it is provably this run's
+    // worktree. A stale/partial/manual directory at the path is a conflict the
+    // operator must resolve — never silently launched as the builder cwd.
+    const valid = await validateReusableWorktree(projectRoot, dir, input.branch);
+    if (!valid.ok) return valid;
     return { ok: true, dir, branch: input.branch, reused: true };
   }
 

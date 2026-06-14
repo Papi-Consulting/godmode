@@ -153,9 +153,17 @@ export function App() {
   const clearRun = useCallback(async () => {
     if (!window.godmode) return;
     const seq = (runRequestSeq.current += 1);
-    const next = await window.godmode.clearRun();
+    const result = await window.godmode.clearRun();
     if (seq !== runRequestSeq.current) return;
-    setRun(next ?? null);
+    // Clear is a guarded terminal-only operation (issue #41): a refusal preserves
+    // the run record and explains the lifecycle step to take first (cancel/close,
+    // then clean up the worktree). Only a successful clear resets run-derived state.
+    if (!result.ok) {
+      setRun(result.run);
+      setRunError(result.error);
+      return;
+    }
+    setRun(null);
     setRunError(null);
     setSendError(null);
     setVerification(null);

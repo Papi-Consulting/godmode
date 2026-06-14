@@ -386,8 +386,12 @@ export type CommitCheckSummary = {
   failing: number;
 };
 
-/** Where the expected commit being verified came from. */
-export type ExpectedCommitSource = 'run_recorded' | 'local_head' | 'unknown';
+/**
+ * Where the expected commit being verified came from. `branch_tip` is the tip of
+ * the run's working branch (correct for worktree runs, where the primary checkout
+ * stays on another branch); `local_head` is the primary checkout's HEAD fallback.
+ */
+export type ExpectedCommitSource = 'run_recorded' | 'branch_tip' | 'local_head' | 'unknown';
 
 /**
  * A single commit-verification result for the operated project's current
@@ -754,6 +758,18 @@ export type RunRejectionCode = 'no_run' | 'invalid_transition' | 'invalid_payloa
 export type RunActionResult =
   | { ok: true; run: RunSnapshot }
   | { ok: false; code: RunRejectionCode; error: string; run: RunSnapshot | null };
+
+/**
+ * Result of the operator's "Clear run" request (issue #41). Clearing discards the
+ * run record, so it is a guarded terminal-only operation: it is refused while a
+ * run is still active, still owns a git worktree, or has a live builder session —
+ * which would otherwise orphan the worktree/PTY with no run record protecting it.
+ * On refusal the run is preserved and `error` explains the lifecycle step to take
+ * first (cancel/close, then clean up the worktree).
+ */
+export type ClearRunResult =
+  | { ok: true; run: null }
+  | { ok: false; error: string; run: RunSnapshot };
 
 /**
  * The reviewed builder handoff for the current run: the exact prompt GodMode

@@ -4,6 +4,7 @@ import type {
   AgentRegistryState,
   AppRepoState,
   BuilderHandoff,
+  ClearRunResult,
   GithubIssueDetailResult,
   GithubState,
   HandoffSendResult,
@@ -72,7 +73,7 @@ const api = {
     prNumber?: number;
     expectedCommit?: string;
   }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
-  clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<RunSnapshot | null>,
+  clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<ClearRunResult>,
   onProjectChanged: (callback: (state: ProjectState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProjectState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.projectChanged, listener);

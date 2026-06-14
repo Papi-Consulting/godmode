@@ -21,6 +21,7 @@ import { getRegistryState, resolveRoleLaunch } from './agents.js';
 import {
   clearRun,
   dispatchRunAction,
+  evaluateClearRun,
   getCurrentRun,
   isTerminalStatus,
   recordCurrentRunPrompt,
@@ -69,6 +70,7 @@ import {
 import type {
   AgentRole,
   BuilderHandoff,
+  ClearRunResult,
   HandoffSendResult,
   ManagedWorktree,
   ReviewSynthesisResult,
@@ -1157,9 +1159,17 @@ function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) 
   return dispatchRunAction(action, options);
 }
 
-function handleClearRun() {
-  clearRun();
-  return getCurrentRun();
+/**
+ * Guarded "Clear run" (issue #41). Clearing drops the run record, so it is refused
+ * while the run is still active, still owns a git worktree, or has a live builder
+ * session — otherwise the worktree/PTY would be orphaned with no run protecting it
+ * from cleanup. The operator is routed through cancel/close + worktree cleanup
+ * first; the run record is preserved until then.
+ */
+function handleClearRun(): ClearRunResult {
+  const decision = evaluateClearRun(getCurrentRun(), hasPtySession('builder'));
+  if (decision.ok) clearRun();
+  return decision;
 }
 
 async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
