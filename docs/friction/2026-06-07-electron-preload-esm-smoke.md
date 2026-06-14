@@ -34,3 +34,12 @@ CommonJS:
 No broad AGENTS.md rule change is needed. The reusable lesson is local to the app
 build: Electron preload output format must be smoke-tested, not inferred from
 TypeScript typecheck/build success.
+
+## Update (2026-06-14): a live guard now exists
+
+This class of failure is now caught automatically by `npm run smoke` (issue #35),
+which launches the real built app and asserts `window.godmode` exists as its first
+assertion. The static `test/preload-build.test.js` still guards the bundle format;
+the smoke proves the bridge actually reaches the renderer at runtime. See
+`test/e2e/smoke.mjs` and `docs/friction/2026-06-14-vite-base-file-url.md` (a
+sibling production-load bug the same smoke surfaced on its first run).
