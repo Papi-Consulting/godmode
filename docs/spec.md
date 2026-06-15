@@ -195,6 +195,34 @@ the fix, and max-cycle limits stay authoritative in the run state machine. Findi
 are stored on the run and mirrored to `.godmode/runs/<run-id>/findings.json`. See
 `docs/architecture/review-synthesis.md`.
 
+### Automatic review/fix loop
+
+Once a run has a verified PR, an optional **review/fix loop controller** in the
+main process drives reviewer launch → synthesis → fix handoff → re-verification →
+re-review automatically, so the operator supervises the loop instead of clicking
+every stage. It holds an explicit per-run mode — `manual` (the default; every
+stage stays operator-triggered, regression-safe) or `auto` — and reacts only to
+**observable events** (run transitions, reviewer session exits, live verification
+results). It is plain code, not a head-agent prompt: it advances a run *only* by
+calling the existing operator-triggered handlers / `dispatchRunAction`, never
+duplicating transition rules and never interpreting agent prose (it consumes the
+same `findings.ts`/verification outputs). The run state machine remains the single
+transition authority.
+
+Operator authority gates hold in auto mode: fix-handoff send stays
+operator-approved by default (`loop.autoSendFix: false`), merge stays manual
+(the loop **stops** at `merge_ready`), and pause/cancel or any manual dispatch
+always preempt. After a fix is sent, the controller watches the PR for the new
+commit (reusing the #9 evidence gate / #38 discovery), re-verifies, and relaunches
+reviewers for the next cycle; `maxCycles` stays authoritative. Stage failures stop
+auto-advancement and route to the existing visible failure surface — no silent
+retries (at most one automatic retry for a transient `gh` failure, logged), and
+ambiguous/missing reviewer output still routes to `needs_human`. Every
+controller-initiated transition is attributed to the `loop` actor in the
+transition log; operator actions remain `operator`. Optional config lives under a
+`loop:` block in `.agentic/godmode.yaml`. See
+`docs/architecture/review-fix-loop.md`.
+
 ## V1 UX Shape
 
 V1 should feel like a terminal multiplexer with agent-specific panes:
@@ -236,7 +264,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [ ] Claude builder run.
 - [x] Reviewer launch: launch Reviewer A/B from a verified PR, capture their output, and post role-signed PR comments (`docs/architecture/reviewer-launch.md`).
 - [x] Review synthesis: parse reviewer findings, compute the verified merge gate, and drive the first blocker-fix cycle (`docs/architecture/review-synthesis.md`).
-- [ ] Automatic review/fix loop.
+- [x] Automatic review/fix loop: a deterministic main-process controller chains reviewer launch → synthesis → fix handoff → re-verification → re-review once a run has a verified PR (`docs/architecture/review-fix-loop.md`).
 - [ ] Dogfood GodMode on itself.
 
 ## Continuous Integration

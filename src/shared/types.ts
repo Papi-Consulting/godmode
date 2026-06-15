@@ -654,6 +654,15 @@ export type RunVerificationLogEntry = {
   summary: string;
 };
 
+/**
+ * Who initiated a run transition (issue #39). Manual operator dispatches and
+ * operator-triggered IPC handlers are attributed to `operator`; transitions the
+ * deterministic review/fix loop controller drove automatically are attributed to
+ * `loop`. This is an audit marker only — it never affects which transitions are
+ * legal (the transition table is the single authority).
+ */
+export type TransitionActor = 'operator' | 'loop';
+
 /** One logged state change, appended on every successful transition. */
 export type RunTransitionLogEntry = {
   /** ISO timestamp the transition was applied. */
@@ -663,6 +672,12 @@ export type RunTransitionLogEntry = {
   action: RunAction;
   /** Operator/system note or blocker explanation, when one was supplied. */
   reason?: string;
+  /**
+   * Who initiated the transition (issue #39). Defaults to `operator`; the loop
+   * controller stamps `loop` on every transition it drives, so the dashboard and
+   * audit can tell automatic progress apart from operator clicks.
+   */
+  actor?: TransitionActor;
 };
 
 /**
@@ -1184,3 +1199,70 @@ export type ReviewSynthesisResult =
       run: RunSnapshot | null;
       verification?: CommitVerification;
     };
+
+// --- Automatic review/fix loop controller (issue #39) ------------------------
+
+/**
+ * Per-run mode of the deterministic review/fix loop controller (issue #39).
+ * - `manual` (default): the controller takes no action; every stage stays
+ *   operator-triggered exactly as before — the regression-safe default.
+ * - `auto`: once a run has a verified PR, the controller chains reviewer launch →
+ *   synthesis → fix handoff → re-verification → re-review by calling the same
+ *   IPC-layer functions, so the operator supervises instead of clicking each step.
+ *   Operator authority gates still hold: fix-send stays operator-approved by
+ *   default, merge stays manual, and pause/cancel always preempt.
+ */
+export type LoopMode = 'manual' | 'auto';
+
+/**
+ * What the loop controller is currently doing or waiting on, as a stable machine
+ * key (the human-readable form is {@link LoopState.label}).
+ * - `inactive`: manual mode, or no run / pre-PR run — the loop is not driving.
+ * - `working`: a stage action is in flight (launching reviewers, synthesizing…).
+ * - `waiting_pr`: auto, but the run has not reached a verified PR yet.
+ * - `waiting_reviewers`: waiting for both reviewer sessions to reach a terminal state.
+ * - `waiting_fix_approval`: a fix cycle is open and `autoSendFix` is off — waiting
+ *   for the operator to approve & send the composed fix handoff.
+ * - `watching_fix_commit`: a fix is in progress; watching the PR for the new commit.
+ * - `synthesis_hold`: synthesis held (e.g. an unverified PR); operator must act.
+ * - `stopped`: the loop reached a stop state (merge_ready / needs_human /
+ *   max_cycles_exceeded / terminal) — nothing more to auto-advance.
+ * - `halted`: a stage failed; auto-advancement stopped until the run state changes
+ *   or the operator re-arms the loop (no silent retry loops).
+ */
+export type LoopWaitReason =
+  | 'inactive'
+  | 'working'
+  | 'waiting_pr'
+  | 'waiting_reviewers'
+  | 'waiting_fix_approval'
+  | 'watching_fix_commit'
+  | 'synthesis_hold'
+  | 'stopped'
+  | 'halted';
+
+/**
+ * Renderer-facing snapshot of the loop controller (issue #39), pushed on
+ * `godmode:run:loop:changed` and returned by `godmode:run:loop:get`. Display-only:
+ * the run state machine remains the single transition authority.
+ */
+export type LoopState = {
+  mode: LoopMode;
+  /** Stable machine key for what the controller is doing/waiting on. */
+  waitingOn: LoopWaitReason;
+  /** Human-readable description of {@link waitingOn} for the run control pane. */
+  label: string;
+  /** Visible reason the loop halted on a stage failure, when relevant. */
+  lastError: string | null;
+  /** ISO timestamp this loop state last changed (main owns the clock). */
+  updatedAt: string;
+};
+
+/**
+ * Result of setting the loop mode over IPC (issue #39). Returns the new loop
+ * state on success; a typed rejection when there is no active run to attach a
+ * mode to.
+ */
+export type LoopModeResult =
+  | { ok: true; loop: LoopState }
+  | { ok: false; code: 'no_run'; error: string };

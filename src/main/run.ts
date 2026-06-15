@@ -15,6 +15,7 @@ import type {
   RunTransitionLogEntry,
   RunVerificationLogEntry,
   RunWorktree,
+  TransitionActor,
   WorkspaceIsolation,
 } from '../shared/types.js';
 
@@ -178,6 +179,12 @@ export type ApplyActionOptions = {
    * checks against the remote PR, in place of the local-HEAD fallback.
    */
   expectedCommit?: string;
+  /**
+   * Who initiated this transition (issue #39). Defaults to `operator`; the
+   * review/fix loop controller passes `loop` so every automatic transition is
+   * attributable in the log. Audit-only — it never affects transition legality.
+   */
+  actor?: TransitionActor;
   /** Override the timestamp; primarily for deterministic tests. */
   now?: string;
 };
@@ -243,7 +250,14 @@ export function applyAction(
     next.blocker = undefined;
   }
 
-  const entry: RunTransitionLogEntry = { at: now, from: run.status, to, action, reason: next.reason };
+  const entry: RunTransitionLogEntry = {
+    at: now,
+    from: run.status,
+    to,
+    action,
+    reason: next.reason,
+    actor: options.actor ?? 'operator',
+  };
   next.log.push(entry);
   next.availableActions = computeAvailableActions(next);
 

@@ -21,6 +21,21 @@ harness:
 workspace:
   isolation: shared
 
+# Automatic review/fix loop controller (issue #39). All conservative-by-default:
+#   auto        - false keeps every stage operator-triggered (regression-safe).
+#                 true lets the controller chain reviewer launch -> synthesis ->
+#                 fix handoff -> re-verification -> re-review once a run has a
+#                 verified PR.
+#   autoSendFix - false keeps fix-handoff send behind explicit operator approval
+#                 even in auto mode (recommended). true auto-sends only when the
+#                 builder session is live and the prompt fully resolves.
+#   maxCycles   - the fix-cycle budget surfaced here (state machine stays the
+#                 authority). See docs/architecture/review-fix-loop.md.
+loop:
+  auto: false
+  autoSendFix: false
+  maxCycles: 3
+
 roles:
   head:
     agent: hermes

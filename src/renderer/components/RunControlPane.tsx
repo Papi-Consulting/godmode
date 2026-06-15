@@ -1,4 +1,6 @@
 import type {
+  LoopMode,
+  LoopState,
   ManagedWorktree,
   RunAction,
   RunBlockerKind,
@@ -116,6 +118,10 @@ type RunControlPaneProps = {
   run: RunSnapshot | null;
   /** Most recent rejected-action message, surfaced inline. */
   error: string | null;
+  /** Loop-controller state (manual/auto + what it is waiting on), issue #39. */
+  loop: LoopState | null;
+  /** Toggle the run's loop mode (manual/auto). */
+  onSetLoopMode: (mode: LoopMode) => void;
   onDispatch: (action: RunAction, options?: RunDispatchOptions) => void;
   onClear: () => void;
   /** True when the operated project is the GodMode app repo (dogfooding nudge, #41). */
@@ -149,6 +155,8 @@ function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
 export function RunControlPane({
   run,
   error,
+  loop,
+  onSetLoopMode,
   onDispatch,
   onClear,
   isAppRepo,
@@ -212,6 +220,44 @@ export function RunControlPane({
                 </dd>
               </div>
             </dl>
+
+            {loop ? (
+              <div className={`run-loop run-loop-${loop.waitingOn}`} aria-label="Review/fix loop">
+                <div className="run-loop-header">
+                  <span className="section-kicker">Auto loop</span>
+                  <div className="run-loop-toggle" role="group" aria-label="Loop mode">
+                    <button
+                      className={loop.mode === 'manual' ? 'primary-action' : ''}
+                      aria-pressed={loop.mode === 'manual'}
+                      onClick={() => onSetLoopMode('manual')}
+                    >
+                      Manual
+                    </button>
+                    <button
+                      className={loop.mode === 'auto' ? 'primary-action' : ''}
+                      aria-pressed={loop.mode === 'auto'}
+                      onClick={() => onSetLoopMode('auto')}
+                    >
+                      Auto
+                    </button>
+                  </div>
+                </div>
+                <p className="run-loop-status" role="status">
+                  {loop.label}
+                </p>
+                {loop.lastError ? (
+                  <p className="run-loop-error" role="alert">
+                    {loop.lastError}
+                  </p>
+                ) : null}
+                {loop.mode === 'auto' ? (
+                  <p className="run-loop-hint">
+                    Pause or any manual action preempts the loop. Fix-send and merge stay
+                    operator-gated.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             {showDogfoodNudge ? (
               <p className="run-nudge" role="status">

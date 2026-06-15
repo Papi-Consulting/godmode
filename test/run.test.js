@@ -324,13 +324,23 @@ test('max_cycles_exceeded can be force-resolved to merge_ready', () => {
 test('every successful transition is logged with from/to/action/reason', () => {
   const run = advance(createRun({ issueNumber: 8, now: NOW, id: 'run-log' }), ['select_issue', 'mark_ready']);
   assert.equal(run.log.length, 2);
-  assert.deepEqual(run.log[0], { at: NOW, from: 'idle', to: 'issue_selected', action: 'select_issue', reason: undefined });
+  // Every transition is stamped with the initiating actor (issue #39); a plain
+  // dispatch defaults to the operator.
+  assert.deepEqual(run.log[0], {
+    at: NOW,
+    from: 'idle',
+    to: 'issue_selected',
+    action: 'select_issue',
+    reason: undefined,
+    actor: 'operator',
+  });
   assert.deepEqual(run.log[1], {
     at: NOW,
     from: 'issue_selected',
     to: 'ready_to_build',
     action: 'mark_ready',
     reason: undefined,
+    actor: 'operator',
   });
 });
 
