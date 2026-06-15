@@ -206,7 +206,7 @@ function makeHarness(opts = {}) {
       if (action === 'push_fix') state.run = { ...state.run, status: 'fix_pushed', expectedCommit: options.expectedCommit };
       return { ok: true };
     },
-    verifyForFix: async () => opts.verification ?? verification(),
+    verifyForFix: opts.verifyForFix ?? (async () => opts.verification ?? verification()),
     emitLoopChanged: () => {},
     emitRunChanged: () => {},
     now: () => '2026-06-14T00:00:00.000Z',
@@ -335,6 +335,114 @@ test('auto: the fix-commit watcher dispatches push_fix when a new commit lands',
   assert.equal(pushFix.options.expectedCommit, 'newsha9999');
   // It then chains to relaunch reviewers for the next cycle.
   assert.equal(h.state.run.status, 'reviewers_running');
+  resetLoopController();
+});
+
+test('blocker A-1: a partial fix-commit verification halts visibly after one retry (no infinite silent retry)', async () => {
+  // Every poll returns a partial (gh/network/auth broken). The watcher must log
+  // one retry, then halt and disarm — not keep polling forever with no error.
+  const h = makeHarness({
+    defaultAuto: true,
+    autoSendFix: true,
+    run: makeRun({ status: 'builder_fixing', expectedCommit: 'abc1234' }),
+    verifyForFix: async () => verification({ status: 'needs_refresh', partial: true, pr: null }),
+  });
+  configureLoopController(h.deps);
+  await tickLoop();
+  assert.equal(getLoopState().waitingOn, 'watching_fix_commit');
+  assert.ok(isFixWatcherActive());
+
+  // First failing poll: budget allows one retry, watcher stays armed, no halt.
+  await h.runWatch();
+  assert.ok(isFixWatcherActive(), 'watcher stays armed for the single retry');
+  assert.notEqual(getLoopState().waitingOn, 'halted');
+
+  // Second consecutive failure: halt visibly and stop the watcher.
+  await h.runWatch();
+  assert.equal(getLoopState().waitingOn, 'halted');
+  assert.match(getLoopState().lastError, /fix-commit verification failed/i);
+  assert.equal(isFixWatcherActive(), false, 'watcher disarms on halt — no infinite retry');
+  // No push_fix could have been dispatched off a partial result.
+  assert.equal(h.calls.dispatch.find((d) => d.action === 'push_fix'), undefined);
+  resetLoopController();
+});
+
+test('blocker A-1: a thrown fix-commit watcher error halts visibly after one retry', async () => {
+  const h = makeHarness({
+    defaultAuto: true,
+    autoSendFix: true,
+    run: makeRun({ status: 'builder_fixing', expectedCommit: 'abc1234' }),
+    verifyForFix: async () => {
+      throw new Error('gh exploded');
+    },
+  });
+  configureLoopController(h.deps);
+  await tickLoop();
+  assert.ok(isFixWatcherActive());
+
+  await h.runWatch();
+  assert.ok(isFixWatcherActive(), 'watcher stays armed for the single retry');
+  await h.runWatch();
+  assert.equal(getLoopState().waitingOn, 'halted');
+  assert.match(getLoopState().lastError, /gh exploded/);
+  assert.equal(isFixWatcherActive(), false);
+  resetLoopController();
+});
+
+test('blocker A-1: a transient partial that recovers does not halt (budget resets on a complete poll)', async () => {
+  let n = 0;
+  const h = makeHarness({
+    defaultAuto: true,
+    autoSendFix: true,
+    run: makeRun({ status: 'builder_fixing', expectedCommit: 'abc1234' }),
+    verifyForFix: async () => {
+      n += 1;
+      // First poll partial (one logged retry), then a complete poll with no new
+      // commit yet, then a complete poll with the landed fix.
+      if (n === 1) return verification({ status: 'needs_refresh', partial: true, pr: null });
+      if (n === 2) return verification({ pr: { number: 7, headSha: 'abc1234', headRefName: 'feat/x' } });
+      return verification({ pr: { number: 7, headSha: 'newsha9999', headRefName: 'feat/x' } });
+    },
+  });
+  configureLoopController(h.deps);
+  await tickLoop();
+
+  await h.runWatch(); // partial -> retry
+  assert.notEqual(getLoopState().waitingOn, 'halted');
+  await h.runWatch(); // complete, head still matches baseline -> keep watching, budget reset
+  assert.notEqual(getLoopState().waitingOn, 'halted');
+  assert.ok(isFixWatcherActive());
+  await h.runWatch(); // complete, new head -> push_fix
+  const pushFix = h.calls.dispatch.find((d) => d.action === 'push_fix');
+  assert.ok(pushFix, 'a recovered watch still detects the landed fix');
+  assert.equal(pushFix.options.expectedCommit, 'newsha9999');
+  resetLoopController();
+});
+
+test('blocker B-1: a stage aborted by an operator pause surfaces as stopped, not a halt error', async () => {
+  // Model the race: the loop drives start_reviewers, but the operator pauses while
+  // the live #9 verification is in flight, so the stage's preemption guard refuses
+  // its side effects and returns ok:false. The controller must treat the now-paused
+  // run as a stop (operator authority), not as a stage failure to halt+retry on.
+  const h = makeHarness({
+    defaultAuto: true,
+    run: makeRun({ status: 'pr_opened' }),
+    onStartReviewers: (state) => {
+      // The operator paused during the await; the handler's preemption guard
+      // aborted before any reviewer PTY/artifact/transition side effect.
+      state.run = { ...state.run, status: 'paused' };
+      return { ok: false, code: 'invalid_state', error: 'The run was preempted (now paused) during verification; reviewers were not launched.' };
+    },
+  });
+  configureLoopController(h.deps);
+  await tickLoop();
+  assert.equal(h.calls.startReviewers.length, 1, 'the stage ran exactly once');
+  assert.equal(getLoopState().waitingOn, 'stopped', 'preemption surfaces as stopped, not halted');
+  assert.equal(getLoopState().lastError, null, 'a preemption is not recorded as a stage failure');
+
+  // A follow-up tick at the paused (stop) status must not re-run the stage.
+  await tickLoop();
+  assert.equal(h.calls.startReviewers.length, 1, 'no retry after operator preemption');
   resetLoopController();
 });
 

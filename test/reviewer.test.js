@@ -5,7 +5,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   canPostReviewerMarker,
+  canSynthesizeReviews,
   composeReviewerLaunch,
+  isReviewSynthesisPreempted,
+  isReviewerLaunchPreempted,
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
@@ -225,4 +228,42 @@ test('isReviewerSessionStale detects a same-run reviewer relaunch across an awai
   assert.equal(isReviewerSessionStale('tok-launch-2', capturedToken), true);
   // The session vanished (cleared/replaced with no token) → stale.
   assert.equal(isReviewerSessionStale(undefined, capturedToken), true);
+});
+
+// --- Preemption guards (issue #39, blocker B-1) ------------------------------
+// A loop- or operator-driven stage captures the run, then `await`s the live #9
+// verification. Pausing or any manual dispatch during that await advances the run
+// WITHOUT changing its id/root, so the stale guard alone would still pass. These
+// pure predicates re-gate the stage on the live status so no PTY spawn / artifact
+// write / finding write / transition happens after operator preemption.
+
+test('canSynthesizeReviews: only the reviewers-running window is synthesis-legal', () => {
+  assert.equal(canSynthesizeReviews('reviewers_running'), true);
+  assert.equal(canSynthesizeReviews('reviewers_rerunning'), true);
+  for (const status of ['pr_opened', 'review_synthesis', 'paused', 'merge_ready', 'builder_fixing']) {
+    assert.equal(canSynthesizeReviews(status), false, `expected ${status} not synthesis-legal`);
+  }
+});
+
+test('isReviewerLaunchPreempted: launch-legal statuses are not preempted', () => {
+  for (const status of ['pr_opened', 'fix_pushed', 'reviewers_running', 'reviewers_rerunning']) {
+    assert.equal(isReviewerLaunchPreempted(status), false, `expected ${status} launchable`);
+  }
+});
+
+test('isReviewerLaunchPreempted: a pause/cancel/terminal during verification aborts the launch', () => {
+  for (const status of ['paused', 'cancelled', 'closed', 'merge_ready', 'needs_human', 'review_synthesis']) {
+    assert.equal(isReviewerLaunchPreempted(status), true, `expected ${status} to preempt launch`);
+  }
+  // No current run (cleared during the await) is preempted by definition.
+  assert.equal(isReviewerLaunchPreempted(null), true);
+});
+
+test('isReviewSynthesisPreempted: leaving the reviewers-running window aborts synthesis', () => {
+  assert.equal(isReviewSynthesisPreempted('reviewers_running'), false);
+  assert.equal(isReviewSynthesisPreempted('reviewers_rerunning'), false);
+  for (const status of ['paused', 'cancelled', 'review_synthesis', 'merge_ready', 'pr_opened']) {
+    assert.equal(isReviewSynthesisPreempted(status), true, `expected ${status} to preempt synthesis`);
+  }
+  assert.equal(isReviewSynthesisPreempted(null), true);
 });

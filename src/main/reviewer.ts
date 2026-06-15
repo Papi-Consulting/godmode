@@ -230,6 +230,46 @@ export function reviewerLaunchTransition(status: RunStatus): ReviewerLaunchTrans
   }
 }
 
+/** Statuses a review synthesis can legally run from (reviewers ran this cycle). */
+const REVIEW_SYNTHESIS_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'reviewers_running',
+  'reviewers_rerunning',
+]);
+
+/** Whether a review synthesis is legal from the given run status. */
+export function canSynthesizeReviews(status: RunStatus): boolean {
+  return REVIEW_SYNTHESIS_STATUSES.has(status);
+}
+
+/**
+ * Whether a loop- or operator-driven reviewer launch must abort because the run
+ * was preempted while its live #9 commit-verification was in flight (issue #39).
+ *
+ * The launch handler captures the run, then `await`s `getCommitVerification`.
+ * Pausing or any manual dispatch during that await advances the run *without*
+ * changing its id or operated-project root, so {@link isReviewerRunContextStale}
+ * alone would still pass and let the stage spawn reviewer PTYs / write artifacts /
+ * transition onto an already-paused or otherwise-preempted run — breaking the
+ * operator-authority boundary. Re-reading the live status and refusing the stage
+ * when it is no longer a launch-legal status closes that gap. A null status (no
+ * current run) is preempted by definition. Pure so the gate is unit-tested.
+ */
+export function isReviewerLaunchPreempted(liveStatus: RunStatus | null): boolean {
+  if (liveStatus === null) return true;
+  return !reviewerLaunchTransition(liveStatus).allowed;
+}
+
+/**
+ * The synthesis-stage analogue of {@link isReviewerLaunchPreempted}: whether a
+ * loop- or operator-driven synthesis must abort because the run left the
+ * reviewers-running window (paused, cancelled, or otherwise advanced) while its
+ * live verification was in flight, so it must not write findings or transition.
+ */
+export function isReviewSynthesisPreempted(liveStatus: RunStatus | null): boolean {
+  if (liveStatus === null) return true;
+  return !canSynthesizeReviews(liveStatus);
+}
+
 /**
  * What a reviewer session's exit means for its tracked state:
  * - `keep_failed`: the session was already `failed` mid-run (e.g. a capture

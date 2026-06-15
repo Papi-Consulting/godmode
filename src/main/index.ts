@@ -73,7 +73,10 @@ import {
 } from './findings.js';
 import {
   canPostReviewerMarker,
+  canSynthesizeReviews,
   composeReviewerLaunch,
+  isReviewSynthesisPreempted,
+  isReviewerLaunchPreempted,
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
@@ -779,6 +782,23 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
     };
   }
 
+  // Preemption guard (issue #39, blocker B-1): pausing or any manual dispatch
+  // during the live verification above advances the run *without* changing its
+  // id/root, so the stale guard alone would let a loop-driven launch spawn
+  // reviewer PTYs / write artifacts / transition onto an already-preempted run.
+  // Re-read the live status and abort before ANY side effect when it is no longer
+  // a launch-legal status for this stage, preserving operator authority.
+  const livePreLaunch = getCurrentRun();
+  if (isReviewerLaunchPreempted(livePreLaunch?.status ?? null)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `The run was preempted (now ${livePreLaunch?.status ?? 'no run'}) during verification; reviewers were not launched.`,
+      run: livePreLaunch,
+      verification,
+    };
+  }
+
   let updated = recordCurrentRunVerification(verification) ?? run;
   if (verification.status !== 'verified' || !verification.pr) {
     emitRunChanged(updated);
@@ -956,9 +976,6 @@ function handlePostReviewerComment(
   return postReviewerCommentAndRecord(payload.paneId);
 }
 
-/** Statuses a review synthesis can run from (reviewers have run for this cycle). */
-const SYNTHESIZE_STATUSES = new Set(['reviewers_running', 'reviewers_rerunning']);
-
 /**
  * Parse each tracked reviewer's captured output into a normalized result. A
  * reviewer whose artifact is absent/unreadable (e.g. a launch failure) parses to
@@ -996,7 +1013,7 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to synthesize reviews for.', run: null };
   }
-  if (!SYNTHESIZE_STATUSES.has(run.status)) {
+  if (!canSynthesizeReviews(run.status)) {
     return {
       ok: false,
       code: 'invalid_state',
@@ -1029,6 +1046,21 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
       code: 'invalid_state',
       error: 'The run or operated project changed during verification; reviews were not synthesized.',
       run: getCurrentRun(),
+      verification,
+    };
+  }
+
+  // Preemption guard (issue #39, blocker B-1): a pause or manual dispatch during
+  // the live verification above leaves the run id/root unchanged, so re-read the
+  // live status and abort before writing findings or transitioning when the run
+  // has left the reviewers-running window (operator authority over the loop).
+  const livePreSynth = getCurrentRun();
+  if (isReviewSynthesisPreempted(livePreSynth?.status ?? null)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
+      run: livePreSynth,
       verification,
     };
   }

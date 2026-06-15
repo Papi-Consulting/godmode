@@ -102,9 +102,17 @@ watcher polls `getCommitVerification` scoped to the run and uses the pure
 head SHA no longer matches the run's recorded `expectedCommit` (the pre-fix
 baseline). On detection it dispatches `push_fix` — recording the new head as the
 expected commit and attributing it to the `loop` actor — and the normal chaining
-relaunches reviewers. A partial/incomplete query is never read as a landed fix;
-the watcher simply polls again (watching is inherently a repeated check, not a
-silent retry of a stage).
+relaunches reviewers. A partial/incomplete query is never read as a landed fix.
+
+A partial query (or a thrown watcher error) is a **transient failure**, not "no
+commit yet": the watcher logs and retries it **at most once** (the same
+single-retry budget the stage actions use), and a second consecutive failure
+**halts the controller visibly and disarms the watcher** rather than polling
+`gh`/network/auth forever with no dashboard error. A complete poll that simply
+finds no new commit yet resets the budget and keeps watching (watching a PR is
+inherently a repeated check). Before each poll's side effects the watcher also
+re-checks the live run is still `builder_fixing` in `auto` mode, so a pause or
+manual preemption tears the watcher down instead of dispatching `push_fix`.
 
 ## Failure routing
 
@@ -118,6 +126,22 @@ failure**, and only when logged.
 
 `needs_human`, `max_cycles_exceeded`, and held synthesis are all stop states: the
 controller never converts ambiguity into progress.
+
+### Preemption of in-flight loop stages
+
+A loop-driven stage (`handleStartReviewers` / `handleSynthesizeReviews`) captures
+the run and then `await`s the live #9 commit-verification. Pausing or any manual
+operator dispatch during that await advances the run **without changing its id or
+operated-project root**, so the run/root stale guard alone would still pass and
+let the stage spawn reviewer PTYs, write artifacts/findings, or transition onto an
+already-preempted run — breaking the operator-authority boundary. After the
+verification await each stage therefore **re-reads the live run status and aborts
+before any side effect** when it is no longer a launch-legal
+(`isReviewerLaunchPreempted`) / synthesis-legal (`isReviewSynthesisPreempted`)
+status. The controller treats such a preemption (run reached a stop status mid
+stage) as a **stop, not a stage failure**: it re-syncs and surfaces the stop
+state rather than recording a halt error or retrying. This keeps pause/manual
+dispatch authoritative over the loop even mid-stage.
 
 ## Audit and visibility
 

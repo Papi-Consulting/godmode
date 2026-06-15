@@ -45,6 +45,17 @@ import { commitMatches } from './verify.js';
 const DEFAULT_WATCH_INTERVAL_MS = 15_000;
 
 /**
+ * How many transient fix-commit-watch verification failures (partial query /
+ * thrown error) are tolerated before the watcher halts visibly. Watching a PR is
+ * inherently a repeated check, so a single incomplete poll is logged and retried
+ * once; a second consecutive failure means `gh`/network/auth is broken, so the
+ * watcher stops and the controller halts instead of polling forever with no
+ * dashboard error (issue #39 — stage failures must surface visibly, no silent
+ * retry loops). This mirrors the single-retry budget the stage actions use.
+ */
+const WATCH_RETRY_BUDGET = 1;
+
+/**
  * Statuses at which the loop stops auto-advancing. These are the merge gate, the
  * human-intervention/▸budget endpoints, pause (operator preemption), and every
  * terminal lifecycle status. From any of these the controller does nothing until
@@ -331,6 +342,9 @@ let retriedStatus: RunStatus | null = null;
 // Fix-commit watcher state.
 let watchTimer: ReturnType<typeof setInterval> | null = null;
 let watchPolling = false;
+// Consecutive transient watch failures (partial/thrown). Reset when the watcher
+// arms fresh, the bound run changes, or a complete poll succeeds.
+let watchFailures = 0;
 
 function clock(): string {
   return deps?.now ? deps.now() : new Date().toISOString();
@@ -373,6 +387,7 @@ export function configureLoopController(injected: LoopControllerDeps): void {
   busy = false;
   pending = false;
   retriedStatus = null;
+  watchFailures = 0;
   stopWatcher();
 }
 
@@ -385,6 +400,7 @@ export function resetLoopController(): void {
   lastError = null;
   haltedStatus = null;
   retriedStatus = null;
+  watchFailures = 0;
   busy = false;
   pending = false;
   publish('inactive', 'Manual mode — the operator drives every step.');
@@ -407,6 +423,7 @@ function syncRun(run: RunSnapshot | null): void {
     haltedStatus = null;
     lastError = null;
     retriedStatus = null;
+    watchFailures = 0;
     stopWatcher();
   }
   // Once the run has moved on from the fix-send window, the cycle's delivered
@@ -525,6 +542,16 @@ async function step(): Promise<boolean> {
   if (!result.ok) {
     const current = deps.getRun();
     const status = current?.status ?? run?.status ?? null;
+    // Preemption, not failure: if the run reached a stop status (paused,
+    // cancelled, or a terminal state) while the stage's live verification was in
+    // flight, the operator or state machine preempted the controller. The stage's
+    // own preemption guard already refused its side effects, so don't record a
+    // halt error — re-sync and surface the stop state the next decision would.
+    if (status && isLoopStopStatus(status)) {
+      syncRun(current);
+      publish('stopped', stopLabel(status));
+      return false;
+    }
     // One automatic retry for a transient gh/network failure, only if logged.
     if (result.transient && status && retriedStatus !== status) {
       retriedStatus = status;
@@ -568,11 +595,32 @@ function halt(status: RunStatus | null, error: string): void {
 
 function ensureWatcher(): void {
   if (!deps || watchTimer !== null) return;
+  // A fresh watch window starts with a clean transient-failure budget.
+  watchFailures = 0;
   const interval = deps.watchIntervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
   const start = deps.setWatchTimer ?? ((fn, ms) => setInterval(fn, ms));
   watchTimer = start(() => {
     void pollFixCommit();
   }, interval);
+}
+
+/**
+ * Record a transient fix-commit-watch failure (incomplete query or thrown
+ * watcher error). The first such failure in a window is logged and retried on the
+ * next poll; a second consecutive one means the verification path is broken, so
+ * the watcher stops and the controller halts visibly — the same single-retry
+ * budget the stage actions use, never an indefinite silent retry loop (issue #39).
+ */
+function failWatch(reason: string): void {
+  watchFailures += 1;
+  if (watchFailures <= WATCH_RETRY_BUDGET) {
+    logMessage(
+      `[godmode:loop] Fix-commit watch: ${reason}; retrying once (${watchFailures}/${WATCH_RETRY_BUDGET}).`,
+    );
+    return;
+  }
+  stopWatcher();
+  halt('builder_fixing', `fix-commit verification failed: ${reason}`);
 }
 
 function stopWatcher(): void {
@@ -603,14 +651,21 @@ async function pollFixCommit(): Promise<void> {
   try {
     const verification = await deps.verifyForFix();
     const current = deps.getRun();
-    if (!current || current.status !== 'builder_fixing') {
+    // Preemption guard: the operator may have paused/cleared the run or left auto
+    // mode while the verification was in flight. Tear down without side effects.
+    if (!current || current.status !== 'builder_fixing' || mode !== 'auto') {
       stopWatcher();
       return;
     }
     if (verification.partial) {
-      logMessage('[godmode:loop] Fix-commit watch: verification query incomplete; will retry on the next poll.');
+      // An incomplete query is a transient failure, not "no commit yet": route it
+      // through the retry budget so a broken `gh`/network/auth halts visibly
+      // instead of polling forever (issue #39, blocker A-1).
+      failWatch('verification query incomplete');
       return;
     }
+    // A complete query: clear the transient-failure budget for this window.
+    watchFailures = 0;
     const detected = detectFixLanded(current, verification);
     if (!detected.landed) return;
 
@@ -630,7 +685,10 @@ async function pollFixCommit(): Promise<void> {
     // Chain forward: fix_pushed → re-launch reviewers.
     await tickLoop();
   } catch (error) {
-    logMessage(`[godmode:loop] Fix-commit watch error: ${(error as Error).message}`);
+    // A thrown watcher error is the same class of transient failure as a partial
+    // query: retry once, then halt visibly rather than leaving the watcher armed
+    // and silently retrying every poll (issue #39, blocker A-1).
+    failWatch((error as Error).message);
   } finally {
     watchPolling = false;
   }
