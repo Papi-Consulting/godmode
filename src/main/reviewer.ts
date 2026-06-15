@@ -230,6 +230,91 @@ export function reviewerLaunchTransition(status: RunStatus): ReviewerLaunchTrans
   }
 }
 
+/** Statuses a review synthesis can legally run from (reviewers ran this cycle). */
+const REVIEW_SYNTHESIS_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'reviewers_running',
+  'reviewers_rerunning',
+]);
+
+/** Whether a review synthesis is legal from the given run status. */
+export function canSynthesizeReviews(status: RunStatus): boolean {
+  return REVIEW_SYNTHESIS_STATUSES.has(status);
+}
+
+/**
+ * Whether a loop- or operator-driven reviewer launch must abort because the run
+ * was preempted while its live #9 commit-verification was in flight (issue #39).
+ *
+ * The launch handler captures the run, then `await`s `getCommitVerification`.
+ * Pausing or any manual dispatch during that await advances the run *without*
+ * changing its id or operated-project root, so {@link isReviewerRunContextStale}
+ * alone would still pass and let the stage spawn reviewer PTYs / write artifacts /
+ * transition onto an already-paused or otherwise-preempted run — breaking the
+ * operator-authority boundary. Re-reading the live status and refusing the stage
+ * when it is no longer a launch-legal status closes that gap. A null status (no
+ * current run) is preempted by definition. Pure so the gate is unit-tested.
+ */
+export function isReviewerLaunchPreempted(liveStatus: RunStatus | null): boolean {
+  if (liveStatus === null) return true;
+  return !reviewerLaunchTransition(liveStatus).allowed;
+}
+
+/**
+ * Whether a **loop-driven** reviewer launch must abort after its awaited #9
+ * verification (issue #39, blocker B-1). Combines two independent preemption
+ * signals:
+ *
+ *  - `generationStale`: an operator/manual dispatch, pause, or loop-mode toggle
+ *    bumped the controller's loop-stage generation while this stage's verification
+ *    was in flight (see `captureLoopStageGeneration`/`preemptLoopStages` in
+ *    `loop.ts`). This is the authority for loop stages because it catches a manual
+ *    dispatch that advanced the run into another **launch-legal** status — e.g.
+ *    the operator manually starting reviewers takes `pr_opened → reviewers_running`,
+ *    which {@link reviewerLaunchTransition} treats as an idempotent relaunch, so
+ *    {@link isReviewerLaunchPreempted} alone returns `false` and would let the
+ *    stale loop stage re-install reviewer records, re-prep artifacts, re-spawn
+ *    PTYs, and re-transition. A status-only guard cannot distinguish "this loop
+ *    stage is still valid" from "the operator already performed the stage."
+ *  - {@link isReviewerLaunchPreempted}: the status-legality fallback, so a stop
+ *    transition (paused/cancelled/terminal) that did not bump the generation still
+ *    aborts the stage.
+ *
+ * Operator-driven launches pass `generationStale = false` (they hold authority and
+ * are never preempted by the generation), reducing this to the plain status guard.
+ * Pure so the combined gate is unit-tested without Electron.
+ */
+export function isLoopReviewerLaunchPreempted(
+  liveStatus: RunStatus | null,
+  generationStale: boolean,
+): boolean {
+  return generationStale || isReviewerLaunchPreempted(liveStatus);
+}
+
+/**
+ * The synthesis-stage analogue of {@link isReviewerLaunchPreempted}: whether a
+ * loop- or operator-driven synthesis must abort because the run left the
+ * reviewers-running window (paused, cancelled, or otherwise advanced) while its
+ * live verification was in flight, so it must not write findings or transition.
+ */
+export function isReviewSynthesisPreempted(liveStatus: RunStatus | null): boolean {
+  if (liveStatus === null) return true;
+  return !canSynthesizeReviews(liveStatus);
+}
+
+/**
+ * The synthesis-stage analogue of {@link isLoopReviewerLaunchPreempted} (issue
+ * #39, blocker B-1): a loop-driven synthesis aborts when either its captured
+ * loop-stage generation went stale (an operator/manual dispatch preempted it
+ * mid-await) or the live status left the reviewers-running window. Operator-driven
+ * synthesis passes `generationStale = false`. Pure for unit testing.
+ */
+export function isLoopReviewSynthesisPreempted(
+  liveStatus: RunStatus | null,
+  generationStale: boolean,
+): boolean {
+  return generationStale || isReviewSynthesisPreempted(liveStatus);
+}
+
 /**
  * What a reviewer session's exit means for its tracked state:
  * - `keep_failed`: the session was already `failed` mid-run (e.g. a capture

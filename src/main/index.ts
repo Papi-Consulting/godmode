@@ -15,8 +15,25 @@ import {
   writeToPtySession,
 } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
-import { DEFAULT_CONFIG, getConfigState, loadConfig, resolveWorkspaceIsolation } from './config.js';
+import {
+  DEFAULT_CONFIG,
+  getConfigState,
+  loadConfig,
+  resolveLoopConfig,
+  resolveWorkspaceIsolation,
+} from './config.js';
 import { getRegistryState, resolveRoleLaunch } from './agents.js';
+import {
+  captureLoopStageGeneration,
+  configureLoopController,
+  getLoopState,
+  isLoopStageGenerationStale,
+  notifyFixDelivered,
+  preemptLoopStages,
+  resetLoopController,
+  setLoopMode,
+  tickLoop,
+} from './loop.js';
 import {
   clearRun,
   dispatchRunAction,
@@ -59,7 +76,10 @@ import {
 } from './findings.js';
 import {
   canPostReviewerMarker,
+  canSynthesizeReviews,
   composeReviewerLaunch,
+  isLoopReviewSynthesisPreempted,
+  isLoopReviewerLaunchPreempted,
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
@@ -71,6 +91,9 @@ import type {
   BuilderHandoff,
   ClearRunResult,
   HandoffSendResult,
+  LoopMode,
+  LoopModeResult,
+  LoopState,
   ManagedWorktree,
   ReviewSynthesisResult,
   ReviewerCommentResult,
@@ -81,6 +104,7 @@ import type {
   RunVerificationResult,
   RunWorktree,
   StartReviewersResult,
+  TransitionActor,
   WorktreeCleanupResult,
 } from '../shared/types.js';
 import { GODMODE_IPC } from '../shared/ipcChannels.js';
@@ -153,6 +177,7 @@ const runSelectManualSchema = z.object({
 });
 const runIsolationSchema = z.object({ isolation: z.enum(['worktree', 'shared']) });
 const worktreeCleanupSchema = z.object({ path: z.string().min(1).max(4096) });
+const loopModeSchema = z.object({ mode: z.enum(['manual', 'auto']) });
 
 function parseIpcPayload<T>(schema: z.ZodType<T>, input: unknown): T | undefined {
   const parsed = schema.safeParse(input);
@@ -191,6 +216,9 @@ function selectProjectAndResetSessions(input: string) {
     // belong to that repo), so discard it when the operated project changes. The
     // renderer reloads run state on `projectChanged` like it does config/GitHub.
     clearRun();
+    // The loop controller is bound to the discarded run — reset it so no watcher
+    // or auto-mode carries over into the newly selected project (issue #39).
+    resetLoopController();
     for (const paneId of killAllPtySessions()) {
       if (mainWindow && !mainWindow.webContents.isDestroyed()) {
         mainWindow.webContents.send(GODMODE_IPC.ptyExit, { paneId, exit: { exitCode: 0 } });
@@ -279,6 +307,13 @@ function currentConfigIsolation(): 'shared' | 'worktree' {
   return resolveWorkspaceIsolation(config);
 }
 
+/** Resolve the operated project's effective review/fix loop settings (issue #39). */
+function currentLoopConfig(): ReturnType<typeof resolveLoopConfig> {
+  const loaded = loadConfig();
+  const config = loaded.status === 'loaded' ? loaded.config : DEFAULT_CONFIG;
+  return resolveLoopConfig(config);
+}
+
 /**
  * Ensure the run-scoped git worktree exists for an isolated run (issue #41),
  * creating it on its branch on first use and reusing it on fix cycles. Idempotent:
@@ -356,15 +391,21 @@ async function handleSelectIssueRun(_event: Electron.IpcMainInvokeEvent, input: 
     };
   }
 
-  return selectIssueRun({
+  const result = selectIssueRun({
     sourceType: 'github_issue',
     sourceId: String(payload.issueNumber),
     issueNumber: payload.issueNumber,
     issueTitle: payload.issueTitle,
-    maxCycles: payload.maxCycles,
+    // The operator override wins; otherwise surface the config-derived budget
+    // (loop.maxCycles) instead of the hardcoded default (issue #39 §5).
+    maxCycles: payload.maxCycles ?? currentLoopConfig().maxCycles,
     isolation: currentConfigIsolation(),
     sourceDetail,
   });
+  // Sync the loop controller to the freshly bound run so it adopts the
+  // config-default mode and publishes its initial state (issue #39).
+  void tickLoop();
+  return result;
 }
 
 function handleGetIssueDetail(_event: Electron.IpcMainInvokeEvent, input: unknown) {
@@ -378,11 +419,14 @@ function handleSelectManualTask(_event: Electron.IpcMainInvokeEvent, input: unkn
   if (!payload) {
     return { ok: false, code: 'invalid_payload', error: 'Invalid manual task payload.', run: getCurrentRun() };
   }
-  return selectManualTaskRun({
+  const result = selectManualTaskRun({
     title: payload.title,
     text: payload.text,
+    maxCycles: currentLoopConfig().maxCycles,
     isolation: currentConfigIsolation(),
   });
+  void tickLoop();
+  return result;
 }
 
 function handleGetHandoff() {
@@ -486,6 +530,7 @@ async function handleSendHandoff(): Promise<HandoffSendResult> {
   if (!started.ok) {
     return { ok: false, code: 'invalid_transition', error: started.error, run: started.run };
   }
+  void tickLoop();
   return { ok: true, run: started.run };
 }
 
@@ -521,6 +566,11 @@ function emitToRenderer(channel: string, payload: unknown): void {
 /** Push the latest run snapshot so async reviewer lifecycle changes reach the UI. */
 function emitRunChanged(run: RunSnapshot | null): void {
   emitToRenderer(GODMODE_IPC.runChanged, run);
+}
+
+/** Push the latest loop-controller state to the run control pane (issue #39). */
+function emitLoopChanged(loop: LoopState): void {
+  emitToRenderer(GODMODE_IPC.runLoopChanged, loop);
 }
 
 /**
@@ -671,6 +721,9 @@ async function handleReviewerExit(paneId: AgentRole, exitCode: number, sessionTo
   // Clean exit: mark completed, then auto-post the role-signed marker comment.
   emitRunChanged(updateCurrentRunReviewer(paneId, { status: 'completed', exitCode }));
   await postReviewerCommentAndRecord(paneId);
+  // A reviewer reaching a terminal state is an observable event the loop reacts
+  // to (auto mode: both reviewers done → synthesize). No-op in manual mode.
+  await tickLoop();
 }
 
 /**
@@ -689,7 +742,7 @@ async function handleReviewerExit(paneId: AgentRole, exitCode: number, sessionTo
  * is resolved by {@link reviewerLaunchTransition} and dispatched once launched,
  * recording the PR number/branch so the later comment post has its coordinates.
  */
-async function handleStartReviewers(): Promise<StartReviewersResult> {
+async function handleStartReviewers(actor: TransitionActor = 'operator'): Promise<StartReviewersResult> {
   const run = getCurrentRun();
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to start reviewers for.', run: null };
@@ -703,6 +756,16 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       run,
     };
   }
+
+  // Loop-stage preemption (issue #39, blocker B-1). A loop-driven launch captures
+  // the controller's preemption generation BEFORE awaiting verification below; a
+  // manual/operator launch instead BUMPS the generation so it preempts any loop
+  // stage already in flight. This is what lets a manual dispatch that advances the
+  // run into another launch-legal status (e.g. `pr_opened → reviewers_running`)
+  // invalidate the stale loop stage that a status-only guard would wave through.
+  const isLoopDriven = actor === 'loop';
+  const stageGeneration = isLoopDriven ? captureLoopStageGeneration() : 0;
+  if (!isLoopDriven) preemptLoopStages();
 
   const captured = { runId: run.id, root: getSelectedProjectRoot() };
   const projectRoot = captured.root;
@@ -728,6 +791,32 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       code: 'invalid_state',
       error: 'The run or operated project changed during verification; reviewers were not launched.',
       run: getCurrentRun(),
+      verification,
+    };
+  }
+
+  // Preemption guard (issue #39, blocker B-1). Two signals abort a loop-driven
+  // launch after the await, before ANY side effect (reviewer-record install,
+  // artifact prep, PTY spawn, prompt write, transition):
+  //   1. generation-stale — an operator/manual dispatch, pause, or mode toggle
+  //      bumped the loop-stage generation during the await, EVEN if it advanced
+  //      the run into another launch-legal status (`reviewers_running`) that a
+  //      status-only guard would treat as a legal idempotent relaunch;
+  //   2. status preemption — the run left the launch-legal window (paused/
+  //      cancelled/terminal) without necessarily bumping the generation.
+  // Operator-driven launches (`generationStale = false`) keep their authority and
+  // are gated only by the status signal. Both paths leave id/root unchanged, so
+  // the run/root stale guard above cannot catch them.
+  const livePreLaunch = getCurrentRun();
+  const launchGenerationStale = isLoopDriven && isLoopStageGenerationStale(stageGeneration);
+  if (isLoopReviewerLaunchPreempted(livePreLaunch?.status ?? null, launchGenerationStale)) {
+    return {
+      ok: false,
+      code: 'preempted',
+      error: launchGenerationStale
+        ? `An operator action preempted the loop during verification (run now ${livePreLaunch?.status ?? 'no run'}); reviewers were not launched.`
+        : `The run was preempted (now ${livePreLaunch?.status ?? 'no run'}) during verification; reviewers were not launched.`,
+      run: livePreLaunch,
       verification,
     };
   }
@@ -879,6 +968,7 @@ async function handleStartReviewers(): Promise<StartReviewersResult> {
       reason: `Launched ${launched} reviewer session(s) for PR #${pr.number}.`,
       prNumber: pr.number,
       branch: pr.branch,
+      actor,
     });
     if (advanced.ok) updated = advanced.run;
   }
@@ -907,9 +997,6 @@ function handlePostReviewerComment(
   }
   return postReviewerCommentAndRecord(payload.paneId);
 }
-
-/** Statuses a review synthesis can run from (reviewers have run for this cycle). */
-const SYNTHESIZE_STATUSES = new Set(['reviewers_running', 'reviewers_rerunning']);
 
 /**
  * Parse each tracked reviewer's captured output into a normalized result. A
@@ -943,12 +1030,12 @@ function parseReviewerResults(run: RunSnapshot, projectRoot: string): ReviewerRe
  *     - `needs_human`: flag for a human (ambiguous/contradictory output);
  *     - `hold`: stay in synthesis (a non-reviewer gate, e.g. an unverified PR).
  */
-async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
+async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Promise<ReviewSynthesisResult> {
   const run = getCurrentRun();
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to synthesize reviews for.', run: null };
   }
-  if (!SYNTHESIZE_STATUSES.has(run.status)) {
+  if (!canSynthesizeReviews(run.status)) {
     return {
       ok: false,
       code: 'invalid_state',
@@ -959,6 +1046,15 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
   if (!run.reviewers || run.reviewers.length === 0) {
     return { ok: false, code: 'no_reviewers', error: 'No reviewer sessions are tracked for this run.', run };
   }
+
+  // Loop-stage preemption generation (issue #39, blocker B-1) — see
+  // handleStartReviewers. A loop-driven synthesis captures the generation before
+  // the await; a manual/operator synthesis bumps it to preempt any in-flight loop
+  // stage. This catches a manual dispatch that keeps the run inside the
+  // reviewers-running window the status-only synthesis guard treats as legal.
+  const isLoopDriven = actor === 'loop';
+  const stageGeneration = isLoopDriven ? captureLoopStageGeneration() : 0;
+  if (!isLoopDriven) preemptLoopStages();
 
   const captured = { runId: run.id, root: getSelectedProjectRoot() };
   const projectRoot = captured.root;
@@ -985,6 +1081,25 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
     };
   }
 
+  // Preemption guard (issue #39, blocker B-1): abort before writing findings or
+  // transitioning when either the loop-stage generation went stale (an operator/
+  // manual dispatch preempted this loop stage mid-await, even inside the still-
+  // legal reviewers-running window) or the run left the synthesis window. Both
+  // leave the run id/root unchanged, so the stale guard above cannot catch them.
+  const livePreSynth = getCurrentRun();
+  const synthGenerationStale = isLoopDriven && isLoopStageGenerationStale(stageGeneration);
+  if (isLoopReviewSynthesisPreempted(livePreSynth?.status ?? null, synthGenerationStale)) {
+    return {
+      ok: false,
+      code: 'preempted',
+      error: synthGenerationStale
+        ? `An operator action preempted the loop during verification (run now ${livePreSynth?.status ?? 'no run'}); reviews were not synthesized.`
+        : `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
+      run: livePreSynth,
+      verification,
+    };
+  }
+
   let updated = recordCurrentRunVerification(verification) ?? run;
 
   const results = parseReviewerResults(updated, projectRoot);
@@ -1005,7 +1120,7 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
 
   // Advance reviewers_running/reviewers_rerunning → review_synthesis.
   const synthReason = `Synthesized ${results.length} reviewer result(s): ${merge.recommendation}.`;
-  const synthesized = dispatchRunAction('synthesize_reviews', { reason: synthReason });
+  const synthesized = dispatchRunAction('synthesize_reviews', { reason: synthReason, actor });
   if (synthesized.ok) updated = synthesized.run;
 
   let fixHandoff: BuilderHandoff | undefined;
@@ -1013,6 +1128,7 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
   if (merge.recommendation === 'merge_ready') {
     const marked = dispatchRunAction('mark_merge_ready', {
       reason: 'Both reviewers cleared and the PR commit is verified.',
+      actor,
     });
     if (marked.ok) updated = marked.run;
   } else if (merge.recommendation === 'request_fix') {
@@ -1021,11 +1137,13 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
       // authoritative terminal-ish state rather than re-requesting a fix.
       const exceeded = dispatchRunAction('exceed_max_cycles', {
         reason: `Fix-cycle budget reached (${updated.cycle}/${updated.maxCycles}) with ${blockers.length} accepted blocker(s) remaining.`,
+        actor,
       });
       if (exceeded.ok) updated = exceeded.run;
     } else {
       const requested = dispatchRunAction('request_fix', {
         reason: `${blockers.length} accepted blocker(s) require a fix cycle.`,
+        actor,
       });
       if (requested.ok) {
         updated = requested.run;
@@ -1048,6 +1166,7 @@ async function handleSynthesizeReviews(): Promise<ReviewSynthesisResult> {
   } else if (merge.recommendation === 'needs_human') {
     const flagged = dispatchRunAction('flag_needs_human', {
       reason: `Reviewer output is ambiguous or contradictory: ${merge.reasons.join(' ')}`,
+      actor,
     });
     if (flagged.ok) updated = flagged.run;
   }
@@ -1148,6 +1267,10 @@ async function handleSendFix(): Promise<HandoffSendResult> {
       promptChars: handoff.prompt.length,
     }) ?? run;
   emitRunChanged(updated);
+  // The fix prompt is delivered (operator-approved or loop-auto): tell the loop
+  // so auto mode begins watching the PR for the resulting fix commit (issue #39).
+  notifyFixDelivered();
+  void tickLoop();
   return { ok: true, run: updated };
 }
 
@@ -1157,7 +1280,20 @@ function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) 
     return { ok: false, code: 'invalid_payload', error: 'Invalid run action payload.', run: getCurrentRun() };
   }
   const { action, ...options } = payload;
-  return dispatchRunAction(action, options);
+  // Operator dispatches are attributed to the operator (the default); a manual
+  // transition is an observable event the loop re-syncs from (it preempts the
+  // controller and resumes auto-advancing from the new state). No-op in manual.
+  //
+  // Invalidate any in-flight loop-driven stage FIRST (issue #39, blocker B-1):
+  // bumping the loop-stage generation synchronously, before the transition,
+  // guarantees that a loop stage suspended on its live verification aborts when it
+  // resumes — even when this dispatch advances the run into another launch-legal
+  // status (e.g. a manual `start_reviewers` taking `pr_opened → reviewers_running`)
+  // that the loop stage's status-only guard would otherwise wave through.
+  preemptLoopStages();
+  const result = dispatchRunAction(action, options);
+  void tickLoop();
+  return result;
 }
 
 /**
@@ -1169,8 +1305,79 @@ function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) 
  */
 function handleClearRun(): ClearRunResult {
   const decision = evaluateClearRun(getCurrentRun(), hasPtySession('builder'));
-  if (decision.ok) clearRun();
+  if (decision.ok) {
+    clearRun();
+    resetLoopController();
+  }
   return decision;
+}
+
+/** Return the current loop-controller state for the run control pane (issue #39). */
+function handleGetLoop(): LoopState {
+  return getLoopState();
+}
+
+/** Set the loop mode (manual/auto) for the current run (issue #39). */
+function handleSetLoopMode(_event: Electron.IpcMainInvokeEvent, input: unknown): Promise<LoopModeResult> {
+  const payload = parseIpcPayload(loopModeSchema, input);
+  if (!payload) {
+    return Promise.resolve({ ok: false, code: 'no_run', error: 'Invalid loop mode payload.' });
+  }
+  return setLoopMode(payload.mode as LoopMode);
+}
+
+/**
+ * Wire the deterministic loop controller (issue #39) with the existing IPC-layer
+ * functions. The controller advances a run *only* by calling these — it never
+ * duplicates transition rules — and attributes every dispatch it drives to the
+ * `loop` actor so the transition log distinguishes automatic progress from
+ * operator clicks. Configured once at startup.
+ */
+function configureLoop(): void {
+  configureLoopController({
+    getRun: getCurrentRun,
+    defaultAuto: () => currentLoopConfig().auto,
+    autoSendFix: () => currentLoopConfig().autoSendFix,
+    startReviewers: async (actor) => {
+      const result = await handleStartReviewers(actor);
+      return {
+        ok: result.ok,
+        error: result.ok ? undefined : result.error,
+        // An operator/manual dispatch preempted this loop stage mid-flight: a clean
+        // hand-off, not a stage failure to halt/retry on (issue #39, blocker B-1).
+        preempted: !result.ok && result.code === 'preempted',
+        // A failed launch whose #9 gate could not complete is transient (one retry).
+        transient: !result.ok && result.verification?.status === 'needs_refresh',
+      };
+    },
+    synthesize: async (actor) => {
+      const result = await handleSynthesizeReviews(actor);
+      return {
+        ok: result.ok,
+        error: result.ok ? undefined : result.error,
+        preempted: !result.ok && result.code === 'preempted',
+        transient: !result.ok && result.verification?.status === 'needs_refresh',
+      };
+    },
+    sendFix: async () => {
+      const result = await handleSendFix();
+      return { ok: result.ok, error: result.ok ? undefined : result.error };
+    },
+    dispatch: (action, options) => {
+      const result = dispatchRunAction(action, options);
+      return { ok: result.ok, error: result.ok ? undefined : result.error };
+    },
+    verifyForFix: () => {
+      const run = getCurrentRun();
+      return getCommitVerification(
+        getSelectedProjectRoot(),
+        { expectedCommit: run?.expectedCommit, branch: run?.worktree ? run.branch : undefined },
+        new Date().toISOString(),
+      );
+    },
+    emitLoopChanged,
+    emitRunChanged: () => emitRunChanged(getCurrentRun()),
+  });
 }
 
 async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown) {
@@ -1336,11 +1543,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);
-  ipcMain.handle(GODMODE_IPC.runStartReviewers, handleStartReviewers);
+  // Operator-triggered launches/synthesis default to the operator actor; the loop
+  // controller calls these same handlers with the `loop` actor (issue #39). Wrap
+  // in arrows so ipcMain's (event, …) args never bind to the actor parameter.
+  ipcMain.handle(GODMODE_IPC.runStartReviewers, () => handleStartReviewers());
   ipcMain.handle(GODMODE_IPC.runReviewerComment, handlePostReviewerComment);
-  ipcMain.handle(GODMODE_IPC.runSynthesizeReviews, handleSynthesizeReviews);
-  ipcMain.handle(GODMODE_IPC.runSendFix, handleSendFix);
+  ipcMain.handle(GODMODE_IPC.runSynthesizeReviews, () => handleSynthesizeReviews());
+  ipcMain.handle(GODMODE_IPC.runSendFix, () => handleSendFix());
   ipcMain.handle(GODMODE_IPC.runSetIsolation, handleSetRunIsolation);
+  ipcMain.handle(GODMODE_IPC.runLoopGet, handleGetLoop);
+  ipcMain.handle(GODMODE_IPC.runLoopSetMode, handleSetLoopMode);
   ipcMain.handle(GODMODE_IPC.worktreeList, handleListWorktrees);
   ipcMain.handle(GODMODE_IPC.worktreeCleanup, handleCleanupWorktree);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
@@ -1351,6 +1563,10 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(() => {
   registerIpcHandlers();
+  // Wire the deterministic review/fix loop controller (issue #39). It stays a
+  // no-op until a run opts into auto mode; manual mode is the regression-safe
+  // default.
+  configureLoop();
 
   createWindow();
 

@@ -4,6 +4,8 @@ import type {
   AgentRole,
   BuilderHandoff,
   CommitVerification,
+  LoopMode,
+  LoopState,
   ManagedWorktree,
   ProjectConfigState,
   ProjectState,
@@ -78,6 +80,7 @@ export function App() {
   const [worktrees, setWorktrees] = useState<ManagedWorktree[]>([]);
   const [worktreeMessage, setWorktreeMessage] = useState<string | null>(null);
   const [run, setRun] = useState<RunSnapshot | null>(null);
+  const [loop, setLoop] = useState<LoopState | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
@@ -100,6 +103,23 @@ export function App() {
     const next = await window.godmode.getRun();
     if (seq !== runRequestSeq.current) return;
     setRun(next ?? null);
+  }, []);
+
+  // The loop controller's state is owned by main; fetch it and keep it fresh via
+  // the onLoopChanged push (issue #39). Display-only — the run state machine
+  // remains the single transition authority.
+  const refreshLoop = useCallback(async () => {
+    if (!window.godmode?.getLoop) return;
+    const next = await window.godmode.getLoop();
+    setLoop(next ?? null);
+  }, []);
+
+  // Toggle the run's loop mode (manual/auto). Main is authoritative: it returns
+  // the new loop state (or a typed rejection when there is no run).
+  const setLoopMode = useCallback(async (mode: LoopMode) => {
+    if (!window.godmode?.setLoopMode) return;
+    const result = await window.godmode.setLoopMode({ mode });
+    if (result.ok) setLoop(result.loop);
   }, []);
 
   // Start a run for an issue selected from the GitHub pane. The main process is
@@ -316,6 +336,7 @@ export function App() {
 
   useEffect(() => {
     void refreshRun();
+    void refreshLoop();
     // A run is scoped to its operated project; main discards it on project
     // change. Invalidate any in-flight fetch and clear the stale snapshot
     // immediately so the previous project's run never lingers, then re-fetch.
@@ -331,6 +352,7 @@ export function App() {
       setFixHandoff(null);
       setSynthError(null);
       void refreshRun();
+      void refreshLoop();
     });
     // Main pushes the run snapshot when async reviewer lifecycle changes (a
     // reviewer session exits, a marker comment posts/fails). Treat it as the
@@ -342,11 +364,17 @@ export function App() {
       // A run change may have created/cleared the run worktree — refresh the list.
       void refreshWorktrees();
     });
+    // Main pushes the loop-controller state on every loop change (mode toggle,
+    // waiting-on change, halt). Treat it as authoritative (issue #39).
+    const offLoop = window.godmode?.onLoopChanged((next) => {
+      setLoop(next ?? null);
+    });
     return () => {
       offProject?.();
       offRun?.();
+      offLoop?.();
     };
-  }, [refreshRun, refreshWorktrees]);
+  }, [refreshRun, refreshLoop, refreshWorktrees]);
 
   useEffect(() => {
     let active = true;
@@ -516,6 +544,8 @@ export function App() {
               <RunControlPane
                 run={run}
                 error={runError}
+                loop={loop}
+                onSetLoopMode={setLoopMode}
                 onDispatch={dispatchRun}
                 onClear={clearRun}
                 isAppRepo={project?.isAppRepo ?? false}

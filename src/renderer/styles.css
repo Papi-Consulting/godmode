@@ -587,6 +587,46 @@ p {
   margin-top: 6px;
 }
 
+.run-loop {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.run-loop-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.run-loop-toggle {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.run-loop-status {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.run-loop-error {
+  margin: 6px 0 0;
+  color: #fca5a5;
+  font-size: 0.64rem;
+}
+
+.run-loop-hint {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 0.6rem;
+  opacity: 0.8;
+}
+
 .run-worktree-actions {
   margin: 8px 0;
 }

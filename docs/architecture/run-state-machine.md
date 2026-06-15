@@ -38,10 +38,18 @@ or SQLite without reshaping.
   with the **unchanged** snapshot — no mutation. The input snapshot is never
   mutated even on success (a new snapshot is returned).
 - Every successful transition appends a log entry (`at`, `from`, `to`, `action`,
-  `reason`) and recomputes `availableActions`.
+  `reason`, `actor`) and recomputes `availableActions`.
 
 `availableActions` is computed from the table, so the renderer renders exactly
 the legal actions and never invents transitions.
+
+The log entry's `actor` (`ApplyActionOptions.actor`, default `operator`) records
+who initiated the transition. The automatic review/fix loop controller (issue
+#39) passes `loop` so the dashboard and audit can tell automatic progress apart
+from operator clicks. It is **audit-only** — the actor never affects which
+transitions are legal; the transition table here stays the single authority. The
+controller advances a run only by dispatching these same named actions, never by
+duplicating transition rules. See `docs/architecture/review-fix-loop.md`.
 
 ## States and transitions
 

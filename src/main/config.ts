@@ -13,6 +13,13 @@ import { getSelectedProjectRoot } from './project.js';
 
 const CONFIG_REL_PATH = '.agentic/godmode.yaml';
 
+/**
+ * Default fix-loop budget surfaced through config (issue #39). Mirrors
+ * `DEFAULT_MAX_CYCLES` in run.ts (the authoritative default); kept here as a local
+ * constant so config.ts stays free of a run.ts import cycle.
+ */
+const DEFAULT_LOOP_MAX_CYCLES = 3;
+
 /** Short, human-facing label per generic role. Display-only; not an identifier. */
 const ROLE_LABEL: Record<AgentRole, string> = {
   head: 'HEAD',
@@ -79,6 +86,20 @@ const godmodeConfigSchema = z
         isolation: z.enum(['worktree', 'shared']).optional(),
       })
       .optional(),
+    /**
+     * Automatic review/fix loop controller settings (issue #39). All optional and
+     * conservative-by-default: `auto` off keeps every stage operator-triggered
+     * (regression-safe), and `autoSendFix` off keeps fix-handoff send behind
+     * explicit operator approval even in auto mode. `maxCycles` simply surfaces the
+     * already-existing fix-cycle budget here.
+     */
+    loop: z
+      .object({
+        auto: z.boolean().optional(),
+        autoSendFix: z.boolean().optional(),
+        maxCycles: z.number().int().min(1).max(50).optional(),
+      })
+      .optional(),
     roles: z.object({
       head: headSchema,
       builder: builderSchema,
@@ -123,6 +144,27 @@ export type GodmodeConfig = z.infer<typeof godmodeConfigSchema>;
  */
 export function resolveWorkspaceIsolation(config: GodmodeConfig): WorkspaceIsolation {
   return config.workspace?.isolation === 'worktree' ? 'worktree' : 'shared';
+}
+
+/**
+ * Effective review/fix loop settings for a config (issue #39). Conservative
+ * defaults preserve today's behavior: `auto` and `autoSendFix` are off unless a
+ * project opts in, and `maxCycles` falls back to the standard budget. The loop
+ * controller and run creation read this single resolver so config and runtime
+ * never drift.
+ */
+export type ResolvedLoopConfig = {
+  auto: boolean;
+  autoSendFix: boolean;
+  maxCycles: number;
+};
+
+export function resolveLoopConfig(config: GodmodeConfig): ResolvedLoopConfig {
+  return {
+    auto: config.loop?.auto === true,
+    autoSendFix: config.loop?.autoSendFix === true,
+    maxCycles: config.loop?.maxCycles ?? DEFAULT_LOOP_MAX_CYCLES,
+  };
 }
 
 /**

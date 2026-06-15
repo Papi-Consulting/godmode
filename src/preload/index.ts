@@ -8,6 +8,9 @@ import type {
   GithubIssueDetailResult,
   GithubState,
   HandoffSendResult,
+  LoopMode,
+  LoopModeResult,
+  LoopState,
   ManagedWorktree,
   ProjectConfigState,
   ProjectState,
@@ -58,6 +61,9 @@ const api = {
     ipcRenderer.invoke(GODMODE_IPC.runReviewerComment, input) as Promise<ReviewerCommentResult>,
   synthesizeReviews: () => ipcRenderer.invoke(GODMODE_IPC.runSynthesizeReviews) as Promise<ReviewSynthesisResult>,
   sendFix: () => ipcRenderer.invoke(GODMODE_IPC.runSendFix) as Promise<HandoffSendResult>,
+  getLoop: () => ipcRenderer.invoke(GODMODE_IPC.runLoopGet) as Promise<LoopState>,
+  setLoopMode: (input: { mode: LoopMode }) =>
+    ipcRenderer.invoke(GODMODE_IPC.runLoopSetMode, input) as Promise<LoopModeResult>,
   setRunIsolation: (input: { isolation: WorkspaceIsolation }) =>
     ipcRenderer.invoke(GODMODE_IPC.runSetIsolation, input) as Promise<
       { ok: true; run: RunSnapshot } | { ok: false; code: string; error: string; run: RunSnapshot | null }
@@ -83,6 +89,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: RunSnapshot | null) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.runChanged, listener);
     return () => ipcRenderer.off(GODMODE_IPC.runChanged, listener);
+  },
+  onLoopChanged: (callback: (loop: LoopState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: LoopState) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runLoopChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runLoopChanged, listener);
   },
   onGithubChanged: (callback: () => void) => {
     const listener = () => callback();
