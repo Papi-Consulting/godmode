@@ -24,9 +24,12 @@ import {
 } from './config.js';
 import { getRegistryState, resolveRoleLaunch } from './agents.js';
 import {
+  captureLoopStageGeneration,
   configureLoopController,
   getLoopState,
+  isLoopStageGenerationStale,
   notifyFixDelivered,
+  preemptLoopStages,
   resetLoopController,
   setLoopMode,
   tickLoop,
@@ -75,8 +78,8 @@ import {
   canPostReviewerMarker,
   canSynthesizeReviews,
   composeReviewerLaunch,
-  isReviewSynthesisPreempted,
-  isReviewerLaunchPreempted,
+  isLoopReviewSynthesisPreempted,
+  isLoopReviewerLaunchPreempted,
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
@@ -754,6 +757,16 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
     };
   }
 
+  // Loop-stage preemption (issue #39, blocker B-1). A loop-driven launch captures
+  // the controller's preemption generation BEFORE awaiting verification below; a
+  // manual/operator launch instead BUMPS the generation so it preempts any loop
+  // stage already in flight. This is what lets a manual dispatch that advances the
+  // run into another launch-legal status (e.g. `pr_opened → reviewers_running`)
+  // invalidate the stale loop stage that a status-only guard would wave through.
+  const isLoopDriven = actor === 'loop';
+  const stageGeneration = isLoopDriven ? captureLoopStageGeneration() : 0;
+  if (!isLoopDriven) preemptLoopStages();
+
   const captured = { runId: run.id, root: getSelectedProjectRoot() };
   const projectRoot = captured.root;
   const now = new Date().toISOString();
@@ -782,18 +795,27 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
     };
   }
 
-  // Preemption guard (issue #39, blocker B-1): pausing or any manual dispatch
-  // during the live verification above advances the run *without* changing its
-  // id/root, so the stale guard alone would let a loop-driven launch spawn
-  // reviewer PTYs / write artifacts / transition onto an already-preempted run.
-  // Re-read the live status and abort before ANY side effect when it is no longer
-  // a launch-legal status for this stage, preserving operator authority.
+  // Preemption guard (issue #39, blocker B-1). Two signals abort a loop-driven
+  // launch after the await, before ANY side effect (reviewer-record install,
+  // artifact prep, PTY spawn, prompt write, transition):
+  //   1. generation-stale — an operator/manual dispatch, pause, or mode toggle
+  //      bumped the loop-stage generation during the await, EVEN if it advanced
+  //      the run into another launch-legal status (`reviewers_running`) that a
+  //      status-only guard would treat as a legal idempotent relaunch;
+  //   2. status preemption — the run left the launch-legal window (paused/
+  //      cancelled/terminal) without necessarily bumping the generation.
+  // Operator-driven launches (`generationStale = false`) keep their authority and
+  // are gated only by the status signal. Both paths leave id/root unchanged, so
+  // the run/root stale guard above cannot catch them.
   const livePreLaunch = getCurrentRun();
-  if (isReviewerLaunchPreempted(livePreLaunch?.status ?? null)) {
+  const launchGenerationStale = isLoopDriven && isLoopStageGenerationStale(stageGeneration);
+  if (isLoopReviewerLaunchPreempted(livePreLaunch?.status ?? null, launchGenerationStale)) {
     return {
       ok: false,
-      code: 'invalid_state',
-      error: `The run was preempted (now ${livePreLaunch?.status ?? 'no run'}) during verification; reviewers were not launched.`,
+      code: 'preempted',
+      error: launchGenerationStale
+        ? `An operator action preempted the loop during verification (run now ${livePreLaunch?.status ?? 'no run'}); reviewers were not launched.`
+        : `The run was preempted (now ${livePreLaunch?.status ?? 'no run'}) during verification; reviewers were not launched.`,
       run: livePreLaunch,
       verification,
     };
@@ -1025,6 +1047,15 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
     return { ok: false, code: 'no_reviewers', error: 'No reviewer sessions are tracked for this run.', run };
   }
 
+  // Loop-stage preemption generation (issue #39, blocker B-1) — see
+  // handleStartReviewers. A loop-driven synthesis captures the generation before
+  // the await; a manual/operator synthesis bumps it to preempt any in-flight loop
+  // stage. This catches a manual dispatch that keeps the run inside the
+  // reviewers-running window the status-only synthesis guard treats as legal.
+  const isLoopDriven = actor === 'loop';
+  const stageGeneration = isLoopDriven ? captureLoopStageGeneration() : 0;
+  if (!isLoopDriven) preemptLoopStages();
+
   const captured = { runId: run.id, root: getSelectedProjectRoot() };
   const projectRoot = captured.root;
   const now = new Date().toISOString();
@@ -1050,16 +1081,20 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
     };
   }
 
-  // Preemption guard (issue #39, blocker B-1): a pause or manual dispatch during
-  // the live verification above leaves the run id/root unchanged, so re-read the
-  // live status and abort before writing findings or transitioning when the run
-  // has left the reviewers-running window (operator authority over the loop).
+  // Preemption guard (issue #39, blocker B-1): abort before writing findings or
+  // transitioning when either the loop-stage generation went stale (an operator/
+  // manual dispatch preempted this loop stage mid-await, even inside the still-
+  // legal reviewers-running window) or the run left the synthesis window. Both
+  // leave the run id/root unchanged, so the stale guard above cannot catch them.
   const livePreSynth = getCurrentRun();
-  if (isReviewSynthesisPreempted(livePreSynth?.status ?? null)) {
+  const synthGenerationStale = isLoopDriven && isLoopStageGenerationStale(stageGeneration);
+  if (isLoopReviewSynthesisPreempted(livePreSynth?.status ?? null, synthGenerationStale)) {
     return {
       ok: false,
-      code: 'invalid_state',
-      error: `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
+      code: 'preempted',
+      error: synthGenerationStale
+        ? `An operator action preempted the loop during verification (run now ${livePreSynth?.status ?? 'no run'}); reviews were not synthesized.`
+        : `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
       run: livePreSynth,
       verification,
     };
@@ -1248,6 +1283,14 @@ function handleDispatchRun(_event: Electron.IpcMainInvokeEvent, input: unknown) 
   // Operator dispatches are attributed to the operator (the default); a manual
   // transition is an observable event the loop re-syncs from (it preempts the
   // controller and resumes auto-advancing from the new state). No-op in manual.
+  //
+  // Invalidate any in-flight loop-driven stage FIRST (issue #39, blocker B-1):
+  // bumping the loop-stage generation synchronously, before the transition,
+  // guarantees that a loop stage suspended on its live verification aborts when it
+  // resumes — even when this dispatch advances the run into another launch-legal
+  // status (e.g. a manual `start_reviewers` taking `pr_opened → reviewers_running`)
+  // that the loop stage's status-only guard would otherwise wave through.
+  preemptLoopStages();
   const result = dispatchRunAction(action, options);
   void tickLoop();
   return result;
@@ -1300,6 +1343,9 @@ function configureLoop(): void {
       return {
         ok: result.ok,
         error: result.ok ? undefined : result.error,
+        // An operator/manual dispatch preempted this loop stage mid-flight: a clean
+        // hand-off, not a stage failure to halt/retry on (issue #39, blocker B-1).
+        preempted: !result.ok && result.code === 'preempted',
         // A failed launch whose #9 gate could not complete is transient (one retry).
         transient: !result.ok && result.verification?.status === 'needs_refresh',
       };
@@ -1309,6 +1355,7 @@ function configureLoop(): void {
       return {
         ok: result.ok,
         error: result.ok ? undefined : result.error,
+        preempted: !result.ok && result.code === 'preempted',
         transient: !result.ok && result.verification?.status === 'needs_refresh',
       };
     },

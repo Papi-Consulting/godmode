@@ -7,6 +7,8 @@ import {
   canPostReviewerMarker,
   canSynthesizeReviews,
   composeReviewerLaunch,
+  isLoopReviewSynthesisPreempted,
+  isLoopReviewerLaunchPreempted,
   isReviewSynthesisPreempted,
   isReviewerLaunchPreempted,
   isReviewerRunContextStale,
@@ -266,4 +268,48 @@ test('isReviewSynthesisPreempted: leaving the reviewers-running window aborts sy
     assert.equal(isReviewSynthesisPreempted(status), true, `expected ${status} to preempt synthesis`);
   }
   assert.equal(isReviewSynthesisPreempted(null), true);
+});
+
+// Blocker B-1 (re-review): the status-only guard above treats a manual
+// `start_reviewers` that advanced `pr_opened → reviewers_running` as a legal
+// idempotent relaunch, so it cannot tell "this loop stage is still valid" from
+// "the operator already performed the stage." The loop-stage generation token
+// closes that gap: a loop-driven stage is preempted whenever its captured
+// generation went stale, EVEN when the live status is otherwise launch-legal.
+test('isLoopReviewerLaunchPreempted: a generation bump preempts a loop stage even in a launch-legal status', () => {
+  // The exact manual-dispatch race: status is still launch-legal but an operator
+  // dispatch bumped the generation while verification was in flight.
+  for (const status of ['pr_opened', 'fix_pushed', 'reviewers_running', 'reviewers_rerunning']) {
+    assert.equal(
+      isLoopReviewerLaunchPreempted(status, true),
+      true,
+      `expected a stale generation to preempt the loop stage at ${status}`,
+    );
+    // No generation bump at the same launch-legal status: a legitimate idempotent
+    // relaunch is NOT preempted (operator-triggered relaunches keep working).
+    assert.equal(
+      isLoopReviewerLaunchPreempted(status, false),
+      false,
+      `expected ${status} with a fresh generation to remain launchable`,
+    );
+  }
+});
+
+test('isLoopReviewerLaunchPreempted: the status guard still preempts without a generation bump', () => {
+  // A stop transition that did not bump the generation still aborts the stage.
+  for (const status of ['paused', 'cancelled', 'review_synthesis', null]) {
+    assert.equal(isLoopReviewerLaunchPreempted(status, false), true, `expected ${status} to preempt`);
+  }
+});
+
+test('isLoopReviewSynthesisPreempted: a generation bump preempts synthesis inside the legal window', () => {
+  // reviewers_running/reviewers_rerunning are the legal synthesis window, yet a
+  // manual dispatch that bumped the generation must still preempt the loop stage.
+  for (const status of ['reviewers_running', 'reviewers_rerunning']) {
+    assert.equal(isLoopReviewSynthesisPreempted(status, true), true, `expected stale gen to preempt at ${status}`);
+    assert.equal(isLoopReviewSynthesisPreempted(status, false), false, `expected fresh gen legal at ${status}`);
+  }
+  // The status guard still preempts a stop transition with no generation bump.
+  assert.equal(isLoopReviewSynthesisPreempted('paused', false), true);
+  assert.equal(isLoopReviewSynthesisPreempted(null, false), true);
 });

@@ -6,13 +6,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  captureLoopStageGeneration,
   configureLoopController,
   decideLoopAction,
   detectFixLanded,
   getLoopState,
   isFixWatcherActive,
+  isLoopStageGenerationStale,
   isLoopStopStatus,
   notifyFixDelivered,
+  preemptLoopStages,
   resetLoopController,
   reviewersTerminal,
   setLoopMode,
@@ -443,6 +446,65 @@ test('blocker B-1: a stage aborted by an operator pause surfaces as stopped, not
   // A follow-up tick at the paused (stop) status must not re-run the stage.
   await tickLoop();
   assert.equal(h.calls.startReviewers.length, 1, 'no retry after operator preemption');
+  resetLoopController();
+});
+
+test('loop-stage generation: capture is stable until a preemption bumps it', () => {
+  const captured = captureLoopStageGeneration();
+  assert.equal(isLoopStageGenerationStale(captured), false, 'a fresh capture is not stale');
+  // An operator/manual dispatch (or mode toggle/reset) bumps the generation.
+  preemptLoopStages();
+  assert.equal(isLoopStageGenerationStale(captured), true, 'the prior capture is now stale');
+  // A re-capture tracks the new generation.
+  const recaptured = captureLoopStageGeneration();
+  assert.equal(isLoopStageGenerationStale(recaptured), false);
+});
+
+test('blocker B-1: a loop stage preempted by a manual dispatch into a launch-legal status stops without halt/retry', async () => {
+  // Model the exact remaining race Reviewer B flagged: the loop drives
+  // start_reviewers from pr_opened and awaits verification; during the await the
+  // OPERATOR manually starts reviewers, advancing the run to `reviewers_running`
+  // (a still-launch-legal status a status-only guard would wave through) and
+  // bumping the loop-stage generation. The real handler then detects the stale
+  // generation and returns `preempted` WITHOUT a second reviewer-record install,
+  // artifact prep, PTY spawn, prompt write, or loop transition. The controller
+  // must treat this as a clean stop — never a halt or a retry.
+  let started = 0;
+  const h = makeHarness({
+    defaultAuto: true,
+    run: makeRun({ status: 'pr_opened' }),
+    onStartReviewers: (state) => {
+      started += 1;
+      // The manual operator dispatch happened during the await: it advanced the
+      // run into a launch-legal status AND preempted the loop-stage generation.
+      state.run = { ...state.run, status: 'reviewers_running', reviewers: [reviewer('running')] };
+      preemptLoopStages();
+      // The handler's generation guard fired, so no side effects were performed.
+      return {
+        ok: false,
+        preempted: true,
+        error: 'An operator action preempted the loop during verification (run now reviewers_running); reviewers were not launched.',
+      };
+    },
+  });
+  configureLoopController(h.deps);
+  await tickLoop();
+
+  // The loop stage ran exactly once and did NOT re-run or halt.
+  assert.equal(started, 1, 'the loop stage ran exactly once');
+  assert.equal(h.calls.startReviewers.length, 1, 'no re-install after manual preemption');
+  assert.equal(getLoopState().waitingOn !== 'halted', true, 'a manual preemption is not a halt');
+  assert.equal(getLoopState().lastError, null, 'a preemption is not recorded as a stage failure');
+  // It did not advance the run itself (no synthesize / push_fix dispatch).
+  assert.equal(h.calls.synthesize.length, 0, 'no synthesis after preemption');
+  assert.equal(h.calls.dispatch.length, 0, 'no loop-driven transition after preemption');
+
+  // A follow-up tick (the kind the manual dispatch queues) re-syncs from the live
+  // reviewers_running run and simply waits for the reviewer sessions — it does not
+  // re-run the preempted stage.
+  await tickLoop();
+  assert.equal(h.calls.startReviewers.length, 1, 'still no re-run on the next tick');
+  assert.equal(getLoopState().waitingOn, 'waiting_reviewers', 're-syncs to waiting on reviewers');
   resetLoopController();
 });
 

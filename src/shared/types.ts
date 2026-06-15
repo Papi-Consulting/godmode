@@ -984,6 +984,11 @@ export type ReviewerLaunchPlan = {
 export type ReviewerRejectionCode =
   | 'no_run'
   | 'invalid_state'
+  // A loop-driven launch was preempted by an operator/manual dispatch, pause, or
+  // mode toggle while its live verification was in flight (issue #39, blocker
+  // B-1). Distinct from `invalid_state` so the controller treats it as a clean
+  // operator hand-off, not a stage failure to halt/retry on.
+  | 'preempted'
   | 'not_verified'
   | 'not_startable'
   | 'no_reviewers_configured'
@@ -1172,6 +1177,11 @@ export type RunFindings = {
 export type ReviewSynthesisRejectionCode =
   | 'no_run'
   | 'invalid_state'
+  // A loop-driven synthesis was preempted by an operator/manual dispatch, pause,
+  // or mode toggle while its live verification was in flight (issue #39, blocker
+  // B-1). Distinct from `invalid_state` so the controller treats it as a clean
+  // operator hand-off rather than a stage failure.
+  | 'preempted'
   | 'no_reviewers'
   | 'no_findings';
 

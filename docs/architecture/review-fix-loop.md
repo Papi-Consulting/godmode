@@ -134,14 +134,37 @@ the run and then `await`s the live #9 commit-verification. Pausing or any manual
 operator dispatch during that await advances the run **without changing its id or
 operated-project root**, so the run/root stale guard alone would still pass and
 let the stage spawn reviewer PTYs, write artifacts/findings, or transition onto an
-already-preempted run — breaking the operator-authority boundary. After the
-verification await each stage therefore **re-reads the live run status and aborts
-before any side effect** when it is no longer a launch-legal
-(`isReviewerLaunchPreempted`) / synthesis-legal (`isReviewSynthesisPreempted`)
-status. The controller treats such a preemption (run reached a stop status mid
-stage) as a **stop, not a stage failure**: it re-syncs and surfaces the stop
-state rather than recording a halt error or retrying. This keeps pause/manual
-dispatch authoritative over the loop even mid-stage.
+already-preempted run — breaking the operator-authority boundary. Two guards close
+this after the verification await, before **any** side effect:
+
+1. **Status guard.** Each stage re-reads the live run status and aborts when it is
+   no longer launch-legal (`isReviewerLaunchPreempted`) / synthesis-legal
+   (`isReviewSynthesisPreempted`) — e.g. the run was paused/cancelled mid-await.
+
+2. **Generation guard (the manual-dispatch race).** A status-only guard cannot
+   distinguish "this loop stage is still valid" from "the operator already
+   performed the stage manually": if the loop starts `start_reviewers` from
+   `pr_opened` and the operator manually starts reviewers during the await, the run
+   advances to `reviewers_running` — a status `reviewerLaunchTransition` treats as a
+   legal **idempotent relaunch**, which the status guard waves through. So the
+   controller carries a monotonic **loop-stage generation** token
+   (`captureLoopStageGeneration` / `isLoopStageGenerationStale` /
+   `preemptLoopStages` in `loop.ts`). A loop-driven stage captures the generation
+   *before* the await; every operator action — each manual run dispatch
+   (`handleDispatchRun`), operator-triggered reviewer/synthesis launch, loop-mode
+   toggle (`setLoopMode`), and controller reset — **bumps** it synchronously. After
+   the await the loop stage aborts if its captured generation went stale, even when
+   the resulting status is otherwise launch-legal. The combined gate is
+   `isLoopReviewerLaunchPreempted` / `isLoopReviewSynthesisPreempted` (status guard
+   OR generation-stale). Operator-driven stages pass `generationStale = false`, so
+   they keep their authority and legitimate idempotent relaunches still work.
+
+A preempted stage returns the dedicated `preempted` rejection code. The controller
+treats it as a **stop/clean hand-off, not a stage failure**: it re-syncs and lets
+the tick the manual dispatch queued surface the new state, never recording a halt
+error or retrying — whether the preemption landed on a stop status (paused/
+cancelled/terminal) or a still-launch-legal status reached by a manual dispatch.
+This keeps pause/manual dispatch authoritative over the loop even mid-stage.
 
 ## Audit and visibility
 

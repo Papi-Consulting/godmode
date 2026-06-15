@@ -272,6 +272,14 @@ export type LoopStageResult = {
   error?: string;
   /** True when the failure was a transient `gh`/network condition (one retry). */
   transient?: boolean;
+  /**
+   * True when the stage refused its side effects because an operator/manual
+   * dispatch, pause, or mode toggle preempted it mid-flight (issue #39, blocker
+   * B-1). The controller treats this as a clean operator hand-off — neither a
+   * halt nor a retry — even when the resulting run status is still launch-legal
+   * (e.g. a manual `start_reviewers` advanced `pr_opened → reviewers_running`).
+   */
+  preempted?: boolean;
 };
 
 /**
@@ -339,6 +347,49 @@ let pending = false;
 // retried at most once. Cleared whenever the status changes.
 let retriedStatus: RunStatus | null = null;
 
+// --- Loop-stage preemption generation (issue #39, blocker B-1) ----------------
+//
+// A monotonic token bumped on every operator/manual preemption: each manual run
+// dispatch, loop-mode toggle, and controller reset. A loop-driven async stage
+// (`handleStartReviewers`/`handleSynthesizeReviews` with the `loop` actor)
+// captures this value *before* it awaits its live #9 verification and re-checks
+// it after the await, before any side effect. If the value changed, an operator
+// action preempted the stage mid-flight and it must abort — even when the
+// resulting run status is still launch-legal. A status-only guard cannot tell
+// "this loop stage is still valid" from "the operator already performed the
+// stage manually" (a manual `start_reviewers` advancing `pr_opened →
+// reviewers_running`, which `reviewerLaunchTransition` treats as an idempotent
+// relaunch), so the generation token is the authority for loop-driven stages.
+let stageGeneration = 0;
+
+/**
+ * Capture the current loop-stage generation. A loop-driven stage calls this at
+ * entry (before its first await) and passes the value to
+ * {@link isLoopStageGenerationStale} after the await to detect preemption.
+ */
+export function captureLoopStageGeneration(): number {
+  return stageGeneration;
+}
+
+/**
+ * Whether the loop-stage generation has advanced since `captured` was taken —
+ * i.e. an operator/manual action preempted the in-flight loop stage. Pure read.
+ */
+export function isLoopStageGenerationStale(captured: number): boolean {
+  return captured !== stageGeneration;
+}
+
+/**
+ * Invalidate any in-flight loop-driven stage. Called synchronously at the entry
+ * of every operator/manual run dispatch (and operator-driven reviewer/synthesis
+ * launch) so a loop stage that captured an earlier generation aborts after its
+ * next await, before performing side effects. Bumping is a no-op for the
+ * operator's own stage (only `loop`-actor stages consult the generation).
+ */
+export function preemptLoopStages(): void {
+  stageGeneration += 1;
+}
+
 // Fix-commit watcher state.
 let watchTimer: ReturnType<typeof setInterval> | null = null;
 let watchPolling = false;
@@ -388,12 +439,15 @@ export function configureLoopController(injected: LoopControllerDeps): void {
   pending = false;
   retriedStatus = null;
   watchFailures = 0;
+  stageGeneration = 0;
   stopWatcher();
 }
 
 /** Reset the controller (used when a run is cleared/project switched). */
 export function resetLoopController(): void {
   stopWatcher();
+  // Clearing the run preempts any loop stage that was in flight against it.
+  preemptLoopStages();
   mode = 'manual';
   lastRunId = null;
   fixDelivered = false;
@@ -453,6 +507,10 @@ export async function setLoopMode(next: LoopMode): Promise<LoopModeResult> {
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to set a loop mode for.' };
   }
+  // An operator mode toggle preempts any loop stage in flight: a stage that
+  // captured the prior generation aborts after its await rather than completing
+  // side effects against a controller the operator just re-armed/disarmed.
+  preemptLoopStages();
   // Adopt the run id so syncRun does not immediately reset the operator's choice.
   lastRunId = run.id;
   mode = next;
@@ -542,14 +600,18 @@ async function step(): Promise<boolean> {
   if (!result.ok) {
     const current = deps.getRun();
     const status = current?.status ?? run?.status ?? null;
-    // Preemption, not failure: if the run reached a stop status (paused,
-    // cancelled, or a terminal state) while the stage's live verification was in
-    // flight, the operator or state machine preempted the controller. The stage's
-    // own preemption guard already refused its side effects, so don't record a
-    // halt error — re-sync and surface the stop state the next decision would.
-    if (status && isLoopStopStatus(status)) {
+    // Preemption, not failure: an operator/manual dispatch, pause, or mode toggle
+    // preempted the stage mid-flight, so its own preemption guard refused all side
+    // effects. This covers two shapes:
+    //  - a generation-preemption (`result.preempted`): the manual dispatch may have
+    //    advanced the run to a still-launch-legal status (e.g. `reviewers_running`),
+    //    so a status check alone would not catch it;
+    //  - a stop-status transition (paused/cancelled/terminal) during the await.
+    // In both cases re-sync and let the tick the manual dispatch queued surface the
+    // new state — never record a halt or retry (operator authority over the loop).
+    if (result.preempted || (status && isLoopStopStatus(status))) {
       syncRun(current);
-      publish('stopped', stopLabel(status));
+      if (status && isLoopStopStatus(status)) publish('stopped', stopLabel(status));
       return false;
     }
     // One automatic retry for a transient gh/network failure, only if logged.
