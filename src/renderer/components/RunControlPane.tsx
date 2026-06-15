@@ -1,7 +1,10 @@
+import { useState } from 'react';
 import type {
   LoopMode,
   LoopState,
   ManagedWorktree,
+  PrCandidate,
+  PrDiscoveryResult,
   RunAction,
   RunBlockerKind,
   RunSnapshot,
@@ -124,6 +127,16 @@ type RunControlPaneProps = {
   onSetLoopMode: (mode: LoopMode) => void;
   onDispatch: (action: RunAction, options?: RunDispatchOptions) => void;
   onClear: () => void;
+  /** Latest PR-discovery result for a builder_running run (issue #38), or null. */
+  discovery: PrDiscoveryResult | null;
+  /** Non-blocking hint (e.g. builder session ended), surfaced inline. */
+  discoveryHint: string | null;
+  /** Whether a discovery query is in flight. */
+  discovering: boolean;
+  /** Run a read-only "Check for PR" discovery pass. */
+  onDiscoverPr: () => void;
+  /** Confirm a discovered candidate: bind it as evidence and verify (#9). */
+  onConfirmCandidate: (candidate: PrCandidate) => void;
   /** True when the operated project is the GodMode app repo (dogfooding nudge, #41). */
   isAppRepo: boolean;
   /** Toggle the run's workspace isolation (the dogfooding nudge's one-click enable). */
@@ -152,6 +165,119 @@ function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
   }
 }
 
+const MATCH_REASON_LABEL: Record<PrCandidate['matchReason'], string> = {
+  issue_link: 'issue link',
+  recent_unlinked: 'recent · unlinked',
+};
+
+function checkedAgo(iso: string): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const seconds = Math.round((Date.now() - then) / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+/**
+ * PR discovery + evidence-bound confirmation, shown while a run is
+ * `builder_running` (issue #38). "Check for PR" runs a read-only discovery pass;
+ * confirming a candidate binds its branch/number/head commit through `open_pr`
+ * and immediately verifies (#9). Zero-candidate, `gh`-error, and ambiguous states
+ * are all visible and non-fatal — the run stays in `builder_running`. A single
+ * unambiguous issue-linked candidate is highlighted as recommended; ambiguous
+ * sets require an explicit operator pick (no auto-selection).
+ */
+function PrDiscoverySection({
+  discovery,
+  discoveryHint,
+  discovering,
+  onDiscoverPr,
+  onConfirmCandidate,
+}: {
+  discovery: PrDiscoveryResult | null;
+  discoveryHint: string | null;
+  discovering: boolean;
+  onDiscoverPr: () => void;
+  onConfirmCandidate: (candidate: PrCandidate) => void;
+}) {
+  const candidates = discovery?.candidates ?? [];
+  const ambiguous = candidates.length > 1 || (candidates.length === 1 && discovery?.recommendedPrNumber === null);
+
+  return (
+    <div className="run-pr-discovery" aria-label="PR discovery">
+      <div className="run-pr-discovery-header">
+        <span className="section-kicker">PR Discovery</span>
+        <button onClick={onDiscoverPr} disabled={discovering}>
+          {discovering ? 'Checking…' : 'Check for PR'}
+        </button>
+      </div>
+
+      {discoveryHint ? (
+        <p className="run-pr-hint" role="status">
+          {discoveryHint}
+        </p>
+      ) : null}
+
+      {discovery ? (
+        discovery.status !== 'ok' ? (
+          <p className="run-pr-error" role="status">
+            {discovery.message ?? 'Could not query GitHub for PRs.'} The run stays in builder-running.
+          </p>
+        ) : candidates.length === 0 ? (
+          <p className="run-pr-empty">
+            No PR found yet for this run{discovery.issueNumber ? ` (issue #${discovery.issueNumber})` : ''}.{' '}
+            <span className="run-pr-checked">checked {checkedAgo(discovery.fetchedAt)}</span>
+          </p>
+        ) : (
+          <>
+            {ambiguous ? (
+              <p className="run-pr-ambiguous" role="status">
+                {candidates.length} candidate{candidates.length === 1 ? '' : 's'} — pick the one to bind.
+              </p>
+            ) : null}
+            <ul className="run-pr-candidates">
+              {candidates.map((candidate) => {
+                const recommended = candidate.number === discovery.recommendedPrNumber;
+                return (
+                  <li key={candidate.number} className={recommended ? 'run-pr-candidate recommended' : 'run-pr-candidate'}>
+                    <div className="run-pr-candidate-head">
+                      <a href={candidate.url} target="_blank" rel="noreferrer" title={candidate.url}>
+                        #{candidate.number}
+                      </a>
+                      <span className={`run-pr-match ${candidate.matchReason}`}>
+                        {MATCH_REASON_LABEL[candidate.matchReason]}
+                      </span>
+                      {recommended ? <span className="run-pr-recommended">recommended</span> : null}
+                    </div>
+                    <p className="run-pr-candidate-title" title={candidate.title}>
+                      {candidate.title}
+                    </p>
+                    <p className="run-pr-candidate-meta">
+                      <code>{candidate.headRefName}</code> · {candidate.headSha.slice(0, 7)}
+                      {candidate.author ? ` · @${candidate.author}` : ''}
+                    </p>
+                    <button className="primary-action" onClick={() => onConfirmCandidate(candidate)}>
+                      Confirm &amp; verify PR #{candidate.number}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )
+      ) : (
+        <p className="run-pr-empty">
+          Check whether the builder has opened a PR for this run, then confirm it to record branch, PR number, and the
+          expected commit as evidence.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function RunControlPane({
   run,
   error,
@@ -159,14 +285,28 @@ export function RunControlPane({
   onSetLoopMode,
   onDispatch,
   onClear,
+  discovery,
+  discoveryHint,
+  discovering,
+  onDiscoverPr,
+  onConfirmCandidate,
   isAppRepo,
   onSetIsolation,
   orphanWorktrees,
   onCleanupWorktree,
   worktreeMessage,
 }: RunControlPaneProps) {
+  const [manualPr, setManualPr] = useState('');
+  const [manualBranch, setManualBranch] = useState('');
   const lastTransition = run && run.log.length > 0 ? run.log[run.log.length - 1] : null;
   const canToggleIsolation = run !== null && ISOLATION_TOGGLE_STATUSES.has(run.status);
+  const showDiscovery = run !== null && run.status === 'builder_running';
+  // The evidence-bound discovery flow is the primary `open_pr` path (issue #38);
+  // never render the old evidence-free "PR opened" button. A manual fallback below
+  // still requires a PR number and is labeled unverified.
+  const actionButtons = run ? run.availableActions.filter((action) => action !== 'open_pr') : [];
+  const manualPrNumber = Number.parseInt(manualPr, 10);
+  const manualPrValid = Number.isInteger(manualPrNumber) && manualPrNumber > 0;
   const showDogfoodNudge = isAppRepo && run !== null && run.isolation === 'shared' && canToggleIsolation;
   const runIsTerminal = run !== null && TERMINAL_RUN_STATUSES.has(run.status);
   // Orphans = managed worktrees not belonging to the active run (the current run's
@@ -312,9 +452,19 @@ export function RunControlPane({
               </p>
             ) : null}
 
+            {showDiscovery ? (
+              <PrDiscoverySection
+                discovery={discovery}
+                discoveryHint={discoveryHint}
+                discovering={discovering}
+                onDiscoverPr={onDiscoverPr}
+                onConfirmCandidate={onConfirmCandidate}
+              />
+            ) : null}
+
             <div className="run-actions" aria-label="Available run actions">
-              {run.availableActions.length > 0 ? (
-                run.availableActions.map((action) => (
+              {actionButtons.length > 0 ? (
+                actionButtons.map((action) => (
                   <button
                     key={action}
                     className={actionClass(action)}
@@ -323,10 +473,49 @@ export function RunControlPane({
                     {ACTION_LABEL[action]}
                   </button>
                 ))
-              ) : (
+              ) : showDiscovery ? null : (
                 <span className="empty-line">No actions available from this state.</span>
               )}
             </div>
+
+            {showDiscovery ? (
+              <details className="run-pr-manual">
+                <summary>Bind a PR manually (unverified)</summary>
+                <p className="run-pr-manual-hint">
+                  Fallback when discovery can’t reach GitHub. Records the PR number without discovered evidence; the run
+                  will still need a commit verification (#9) before reviewers can launch.
+                </p>
+                <div className="run-pr-manual-row">
+                  <input
+                    aria-label="PR number"
+                    inputMode="numeric"
+                    placeholder="PR #"
+                    value={manualPr}
+                    onChange={(event) => setManualPr(event.target.value.replace(/[^0-9]/g, ''))}
+                  />
+                  <input
+                    aria-label="Branch"
+                    placeholder="branch (optional)"
+                    value={manualBranch}
+                    onChange={(event) => setManualBranch(event.target.value)}
+                  />
+                  <button
+                    disabled={!manualPrValid}
+                    onClick={() => {
+                      onDispatch('open_pr', {
+                        prNumber: manualPrNumber,
+                        branch: manualBranch.trim() || undefined,
+                        reason: `PR #${manualPrNumber} bound manually (unverified) by operator.`,
+                      });
+                      setManualPr('');
+                      setManualBranch('');
+                    }}
+                  >
+                    Bind PR (unverified)
+                  </button>
+                </div>
+              </details>
+            ) : null}
 
             <div className="run-footer-actions">
               <button onClick={onClear}>Clear run</button>

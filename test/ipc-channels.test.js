@@ -6,7 +6,7 @@ import { GODMODE_IPC, GODMODE_IPC_CHANNELS } from '../dist/shared/ipcChannels.js
 
 test('GodMode IPC channels are unique and namespaced', () => {
   const channels = GODMODE_IPC_CHANNELS;
-  assert.equal(channels.length, 35);
+  assert.equal(channels.length, 38);
   assert.equal(new Set(channels).size, channels.length);
   for (const channel of channels) {
     assert.match(channel, /^godmode:/);
@@ -40,6 +40,9 @@ test('GodMode IPC channel registry keeps the expected public surface', () => {
     'runLoopChanged',
     'runLoopGet',
     'runLoopSetMode',
+    'runPrConfirm',
+    'runPrDiscover',
+    'runPrDiscovered',
     'runReviewerComment',
     'runSelectIssue',
     'runSelectManual',

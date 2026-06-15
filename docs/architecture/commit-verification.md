@@ -19,7 +19,10 @@ PR existence or a reviewer's claim.
 | Impure evidence gathering (`git`/`gh`) | `getCommitVerification` in `src/main/github.ts` |
 | Run-recorded expected commit + verification history | `RunSnapshot.expectedCommit` / `RunSnapshot.verifications`, `recordVerification` in `src/main/run.ts` |
 | IPC: run the gate and record it on the run | `godmode:run:verify` (`handleVerifyRun`) in `src/main/index.ts` |
-| Operator-facing evidence panel | `src/renderer/components/VerificationPane.tsx` |
+| Pure PR-candidate matching + ambiguity decision (#38) | `matchPrCandidates`, `referencesIssue`, `selectPrCandidate` in `src/main/discovery.ts` |
+| Impure PR discovery fetch (`gh pr list`, #38) | `discoverRunPrCandidates` in `src/main/github.ts` |
+| IPC: discover + confirm an evidence-bound `open_pr` (#38) | `godmode:run:pr:discover` / `godmode:run:pr:confirm` / `godmode:run:pr:discovered` in `src/main/index.ts` |
+| Operator-facing evidence panel + PR discovery UI | `src/renderer/components/VerificationPane.tsx`, `src/renderer/components/RunControlPane.tsx` |
 
 The pure core (`deriveVerification`, `commitMatches`, `summarizeChecks`) is
 Electron/`gh`-free and unit-tested directly (`test/verify.test.js`). The impure
@@ -87,6 +90,40 @@ expected commit + source, PR number/state, summary). This gives the run an
 auditable history of *what was verified when*, so a later merge-ready decision
 consumes recorded evidence rather than re-trusting a transient query. With no
 active run, the gate still runs (branch + local HEAD) but records nothing.
+
+## PR discovery (#38)
+
+Before the gate can verify anything, the run needs to know *which* PR to verify.
+While a run is `builder_running`, **PR discovery** binds the builder's PR from
+read-only GitHub evidence instead of a blind operator click, mirroring this
+module's pure/impure split:
+
+- **Pure matching** — `src/main/discovery.ts`. `matchPrCandidates(prs, context)`
+  classifies fetched PRs into candidates:
+  - `issue_link` — the PR title or body references the run's issue via `#N`
+    (covering `Closes #N` / `Fixes #N` / a bare `#N`). `referencesIssue` uses a
+    trailing-digit negative lookahead so `#12` never matches `#123`.
+  - `recent_unlinked` — a conservative fallback for a forgotten link: open PRs
+    created at/after the handoff send time. Only produced when that time is known
+    (the first builder prompt on the run); a PR already matched by link is never
+    double-counted.
+  `selectPrCandidate` then decides ambiguity: exactly one `issue_link` candidate
+  is the unambiguous, confirmed-pending pick (even alongside recent-unlinked
+  noise); anything else (zero, multiple links, or recent-unlinked-only) requires
+  an explicit operator pick. Discovery never auto-selects a weak match.
+- **Impure fetch** — `discoverRunPrCandidates` in `src/main/github.ts`. Issues a
+  single read-only `gh pr list --state open --json number,title,body,url,headRefName,headRefOid,author,createdAt`,
+  scoped to the operated project root, and folds every failure into a non-fatal
+  `status`/`message` with empty candidates (the run stays in `builder_running`).
+  Each candidate carries number, URL, head branch, head SHA, author, created-at,
+  and match reason.
+
+Confirming a candidate (`godmode:run:pr:confirm`) dispatches `open_pr` with
+`branch`/`prNumber`/expected head commit pre-bound, then runs this gate
+immediately and records it. The builder PTY exiting during `builder_running`
+pushes a non-blocking hint plus one discovery pass (`godmode:run:pr:discovered`)
+but never transitions the run. A periodic poll is intentionally out of scope for
+v1 — discovery is on-demand plus the builder-exit pass only.
 
 ## UI
 

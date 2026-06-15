@@ -5,6 +5,7 @@ import type {
   AppRepoState,
   BuilderHandoff,
   ClearRunResult,
+  ConfirmPrCandidateResult,
   GithubIssueDetailResult,
   GithubState,
   HandoffSendResult,
@@ -12,6 +13,9 @@ import type {
   LoopModeResult,
   LoopState,
   ManagedWorktree,
+  PrCandidateMatchReason,
+  PrDiscoveryEvent,
+  PrDiscoveryResult,
   ProjectConfigState,
   ProjectState,
   ReviewSynthesisResult,
@@ -56,6 +60,13 @@ const api = {
   getHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffGet) as Promise<BuilderHandoff>,
   sendHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffSend) as Promise<HandoffSendResult>,
   verifyCommit: () => ipcRenderer.invoke(GODMODE_IPC.runVerify) as Promise<RunVerificationResult>,
+  discoverPr: () => ipcRenderer.invoke(GODMODE_IPC.runPrDiscover) as Promise<PrDiscoveryResult>,
+  confirmPrCandidate: (input: {
+    prNumber: number;
+    branch: string;
+    expectedCommit: string;
+    matchReason?: PrCandidateMatchReason;
+  }) => ipcRenderer.invoke(GODMODE_IPC.runPrConfirm, input) as Promise<ConfirmPrCandidateResult>,
   startReviewers: () => ipcRenderer.invoke(GODMODE_IPC.runStartReviewers) as Promise<StartReviewersResult>,
   postReviewerComment: (input: { paneId: 'reviewer_a' | 'reviewer_b' }) =>
     ipcRenderer.invoke(GODMODE_IPC.runReviewerComment, input) as Promise<ReviewerCommentResult>,
@@ -94,6 +105,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: LoopState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.runLoopChanged, listener);
     return () => ipcRenderer.off(GODMODE_IPC.runLoopChanged, listener);
+  },
+  onPrDiscovered: (callback: (event: PrDiscoveryEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: PrDiscoveryEvent) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runPrDiscovered, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runPrDiscovered, listener);
   },
   onGithubChanged: (callback: () => void) => {
     const listener = () => callback();

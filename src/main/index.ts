@@ -4,7 +4,14 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { getAppRepoState } from './appRepo.js';
-import { getCommitVerification, getGithubState, getIssueDetail, postPrComment } from './github.js';
+import {
+  discoverRunPrCandidates,
+  getCommitVerification,
+  getGithubState,
+  getIssueDetail,
+  postPrComment,
+} from './github.js';
+import type { DiscoveryContext } from './discovery.js';
 import {
   getPtySessionCwd,
   hasPtySession,
@@ -90,11 +97,13 @@ import type {
   AgentRole,
   BuilderHandoff,
   ClearRunResult,
+  ConfirmPrCandidateResult,
   HandoffSendResult,
   LoopMode,
   LoopModeResult,
   LoopState,
   ManagedWorktree,
+  PrDiscoveryResult,
   ReviewSynthesisResult,
   ReviewerCommentResult,
   ReviewerResult,
@@ -169,6 +178,14 @@ const runDispatchSchema = z.object({
     .optional(),
 });
 const githubIssueSchema = z.object({ issueNumber: z.number().int().positive() });
+const runPrConfirmSchema = z.object({
+  prNumber: z.number().int().positive(),
+  branch: z.string().min(1).max(255),
+  expectedCommit: z
+    .string()
+    .regex(/^[0-9a-f]{7,40}$/i, 'expectedCommit must be a 7–40 char hex SHA'),
+  matchReason: z.enum(['issue_link', 'recent_unlinked']).optional(),
+});
 const reviewerPaneSchema = z.enum(['reviewer_a', 'reviewer_b']);
 const reviewerCommentSchema = z.object({ paneId: reviewerPaneSchema });
 const runSelectManualSchema = z.object({
@@ -571,6 +588,123 @@ function emitRunChanged(run: RunSnapshot | null): void {
 /** Push the latest loop-controller state to the run control pane (issue #39). */
 function emitLoopChanged(loop: LoopState): void {
   emitToRenderer(GODMODE_IPC.runLoopChanged, loop);
+}
+
+/**
+ * Build the PR-discovery matching context from a run (issue #38): its issue
+ * number (for the `#N` link match) and the builder handoff send time (for the
+ * conservative recent-unlinked fallback). The handoff time is the first builder
+ * prompt recorded on the run; absent it, discovery skips the recent fallback and
+ * relies on the explicit issue link only.
+ */
+function discoveryContext(run: RunSnapshot): DiscoveryContext {
+  const builderPrompt = run.prompts.find((entry) => entry.role === 'builder');
+  return { issueNumber: run.issueNumber, handoffSentAt: builderPrompt?.at };
+}
+
+/**
+ * Discover the builder's PR for the current run from read-only GitHub evidence
+ * (issue #38). Lists open PRs scoped to the operated project and classifies
+ * candidates by issue link / recent-unlinked fallback. Never throws or mutates:
+ * with no active run it returns an error-status result with no candidates, and
+ * every `gh` failure folds into the result so the run stays in `builder_running`.
+ */
+function handleDiscoverPr(): Promise<PrDiscoveryResult> {
+  const now = new Date().toISOString();
+  const run = getCurrentRun();
+  if (!run) {
+    return Promise.resolve({
+      status: 'error',
+      message: 'There is no active run to discover a PR for.',
+      candidates: [],
+      recommendedPrNumber: null,
+      fetchedAt: now,
+    });
+  }
+  return discoverRunPrCandidates(getSelectedProjectRoot(), discoveryContext(run), now);
+}
+
+/**
+ * Confirm a discovered PR candidate (issue #38): bind its branch / number / head
+ * commit to the run through the existing `open_pr` guard, then immediately run the
+ * #9 commit-verification gate and record it — so confirmation always carries
+ * evidence (branch, PR number, expected commit) and the operator sees the
+ * verification result right away. The transition-log reason names the PR and how
+ * it matched. Only valid from `builder_running`; a rejected confirm leaves the run
+ * untouched.
+ */
+async function handleConfirmPrCandidate(
+  _event: Electron.IpcMainInvokeEvent,
+  input: unknown,
+): Promise<ConfirmPrCandidateResult> {
+  const payload = parseIpcPayload(runPrConfirmSchema, input);
+  if (!payload) {
+    return { ok: false, code: 'invalid_payload', error: 'Invalid PR candidate payload.', run: getCurrentRun() };
+  }
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to bind a PR to.', run: null };
+  }
+  if (run.status !== 'builder_running') {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `A PR candidate is confirmed from a builder-running run (current: ${run.status}).`,
+      run,
+    };
+  }
+
+  // A manual/operator confirm is an observable event the loop re-syncs from; it
+  // preempts any in-flight loop stage exactly like a raw dispatch (issue #39).
+  preemptLoopStages();
+  const matched = payload.matchReason === 'recent_unlinked' ? 'recent unlinked PR' : 'issue link';
+  const reason =
+    `PR #${payload.prNumber} discovered by ${matched} on branch ${payload.branch} ` +
+    `at commit ${payload.expectedCommit.slice(0, 7)}; bound as open_pr evidence.`;
+  const opened = dispatchRunAction('open_pr', {
+    branch: payload.branch,
+    prNumber: payload.prNumber,
+    expectedCommit: payload.expectedCommit,
+    reason,
+  });
+  if (!opened.ok) {
+    return { ok: false, code: 'invalid_transition', error: opened.error, run: opened.run };
+  }
+
+  // Immediately run the #9 evidence gate against the freshly bound coordinates and
+  // record it, so the verification pane reflects the confirmation right away.
+  const bound = opened.run;
+  const verification = await getCommitVerification(
+    getSelectedProjectRoot(),
+    { expectedCommit: bound.expectedCommit, branch: bound.worktree ? bound.branch : undefined },
+    new Date().toISOString(),
+  );
+  const updated = recordCurrentRunVerification(verification) ?? bound;
+  emitRunChanged(updated);
+  void tickLoop();
+  return { ok: true, run: updated, verification };
+}
+
+/**
+ * React to the builder pane's PTY exiting during `builder_running` (issue #38):
+ * surface a non-blocking hint and run **one** discovery pass so a freshly opened
+ * PR shows up without the operator alt-tabbing to a terminal. PTY exit alone must
+ * never transition the run — this only pushes a hint + candidates; the operator
+ * still confirms. A no-op unless a run is in `builder_running`.
+ */
+async function handleBuilderExit(): Promise<void> {
+  const run = getCurrentRun();
+  if (!run || run.status !== 'builder_running') return;
+  const captured = { runId: run.id, root: getSelectedProjectRoot() };
+  const discovery = await discoverRunPrCandidates(captured.root, discoveryContext(run), new Date().toISOString());
+  // The operator may have switched project or cleared/replaced the run during the
+  // await; don't push a discovery scoped to a run/root that is no longer current.
+  const live = getCurrentRun();
+  if (!live || live.id !== captured.runId || getSelectedProjectRoot() !== captured.root) return;
+  emitToRenderer(GODMODE_IPC.runPrDiscovered, {
+    hint: 'Builder session ended — check for the PR it opened.',
+    discovery,
+  });
 }
 
 /**
@@ -1424,7 +1558,13 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
     worktreePath,
     command: launch.spec.command,
     onData: (data) => event.sender.send(GODMODE_IPC.ptyData, { paneId: payload.paneId, data }),
-    onExit: (exit) => event.sender.send(GODMODE_IPC.ptyExit, { paneId: payload.paneId, exit }),
+    onExit: (exit) => {
+      event.sender.send(GODMODE_IPC.ptyExit, { paneId: payload.paneId, exit });
+      // A builder pane exiting during builder_running is an observable signal that
+      // the builder may have just opened a PR. Surface a non-blocking hint and run
+      // one discovery pass (issue #38). This never transitions the run by itself.
+      if (payload.paneId === 'builder') void handleBuilderExit();
+    },
   });
 }
 
@@ -1543,6 +1683,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);
+  ipcMain.handle(GODMODE_IPC.runPrDiscover, handleDiscoverPr);
+  ipcMain.handle(GODMODE_IPC.runPrConfirm, handleConfirmPrCandidate);
   // Operator-triggered launches/synthesis default to the operator actor; the loop
   // controller calls these same handlers with the `loop` actor (issue #39). Wrap
   // in arrows so ipcMain's (event, …) args never bind to the actor parameter.

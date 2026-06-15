@@ -250,12 +250,17 @@ export function applyAction(
     next.blocker = undefined;
   }
 
+  // The transition log records the reason supplied for *this* transition, even
+  // for forward actions whose reason is not sticky on the snapshot (e.g. the
+  // evidence-bound `open_pr` naming the discovered PR, issue #38). The sticky
+  // `run.reason` banner stays governed by REASON_BEARING_ACTIONS so clean forward
+  // progress never leaves a stale warn/blocker reason on the run.
   const entry: RunTransitionLogEntry = {
     at: now,
     from: run.status,
     to,
     action,
-    reason: next.reason,
+    reason: options.reason ?? next.reason,
     actor: options.actor ?? 'operator',
   };
   next.log.push(entry);
