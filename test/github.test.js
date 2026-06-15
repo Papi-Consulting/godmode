@@ -84,6 +84,39 @@ test('getCommitVerification falls back to local HEAD when the branch is unresolv
   assert.equal(v.expectedCommitSource, 'local_head');
 });
 
+test('getCommitVerification scopes to the bound branch even in shared mode with a moved checkout (#38 A-1/B-1)', async () => {
+  // Regression for the Reviewer A/B blocker: a shared run binds a discovered PR
+  // branch, but the operator's checkout has since moved off it (to `main`, here).
+  // The index.ts callers must verify against the *recorded* branch, never the
+  // current checkout. This proves the contract those callers now rely on: passing
+  // the bound branch resolves its tip; falling back to the checkout (the old
+  // `worktree ? branch : undefined` behavior) would verify the wrong commit.
+  const root = makeRepo();
+  const mainHead = git(root, ['rev-parse', 'HEAD']).trim();
+
+  // A divergent PR branch, then the operator's checkout moves back to main.
+  git(root, ['checkout', '-b', 'feat/discovered-pr']);
+  fs.writeFileSync(path.join(root, 'pr-work.txt'), 'builder work\n');
+  git(root, ['add', '.']);
+  git(root, ['commit', '-m', 'builder commit on the PR branch']);
+  const prBranchTip = git(root, ['rev-parse', 'HEAD']).trim();
+  git(root, ['checkout', 'main']);
+  assert.notEqual(prBranchTip, mainHead, 'precondition: PR branch tip must differ from main HEAD');
+  assert.equal(git(root, ['rev-parse', 'HEAD']).trim(), mainHead, 'precondition: checkout sits on main');
+
+  // The fix: passing the bound branch verifies the PR branch tip.
+  const bound = await getCommitVerification(root, { branch: 'feat/discovered-pr' }, NOW);
+  assert.equal(bound.expectedCommit, prBranchTip);
+  assert.equal(bound.expectedCommitSource, 'branch_tip');
+  assert.equal(bound.branch, 'feat/discovered-pr');
+
+  // The old behavior (no branch -> current checkout) would have verified main's
+  // HEAD instead — the wrong target. Pinned here to lock in why the fix matters.
+  const fellBack = await getCommitVerification(root, {}, NOW);
+  assert.equal(fellBack.expectedCommit, mainHead);
+  assert.notEqual(fellBack.expectedCommit, bound.expectedCommit);
+});
+
 test('getCommitVerification prefers the run-recorded commit over any git lookup', async () => {
   const root = makeRepo();
   const recorded = 'a'.repeat(40);

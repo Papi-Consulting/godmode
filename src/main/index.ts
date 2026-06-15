@@ -561,9 +561,13 @@ async function handleSendHandoff(): Promise<HandoffSendResult> {
  */
 async function handleVerifyRun(): Promise<RunVerificationResult> {
   const run = getCurrentRun();
+  // Verify against the run's recorded branch (the bound #38 evidence) when a run is
+  // active, for both shared and worktree runs — the operator's current checkout is
+  // never authoritative once a PR branch is bound. With no run, fall back to the
+  // operated project's current branch.
   const verification = await getCommitVerification(
     getSelectedProjectRoot(),
-    { expectedCommit: run?.expectedCommit, branch: run?.worktree ? run.branch : undefined },
+    { expectedCommit: run?.expectedCommit, branch: run?.branch },
     new Date().toISOString(),
   );
   // Persist the result on the current run for an auditable evidence trail. With
@@ -671,14 +675,37 @@ async function handleConfirmPrCandidate(
     return { ok: false, code: 'invalid_transition', error: opened.error, run: opened.run };
   }
 
+  // Capture the run/root the confirmation belongs to before the async gate below,
+  // so a project switch during the await can't record verification onto a
+  // different run or emit a stale snapshot (mirrors handleStartReviewers).
+  const bound = opened.run;
+  const captured = { runId: bound.id, root: getSelectedProjectRoot() };
+
   // Immediately run the #9 evidence gate against the freshly bound coordinates and
   // record it, so the verification pane reflects the confirmation right away.
-  const bound = opened.run;
+  // Verify against the *discovered* PR branch (the bound evidence), not the
+  // operator's current checkout: a shared-mode confirm whose checkout sits on
+  // `main`/detached must still verify the bound PR branch, exactly like a worktree
+  // run. `getCommitVerification` resolves the branch tip correctly for both modes.
   const verification = await getCommitVerification(
-    getSelectedProjectRoot(),
-    { expectedCommit: bound.expectedCommit, branch: bound.worktree ? bound.branch : undefined },
+    captured.root,
+    { expectedCommit: bound.expectedCommit, branch: bound.branch },
     new Date().toISOString(),
   );
+
+  // Stale guard: the operator may have switched the operated project (or cleared/
+  // replaced the run) during the await above — `selectProjectAndResetSessions`
+  // clears the run. Re-confirm the same run and root before recording/emitting, so
+  // a stale invocation can't patch verification onto a run/root it no longer owns.
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The run or operated project changed during verification; the PR confirmation was not recorded.',
+      run: getCurrentRun(),
+    };
+  }
+
   const updated = recordCurrentRunVerification(verification) ?? bound;
   emitRunChanged(updated);
   void tickLoop();
@@ -906,11 +933,14 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
   const now = new Date().toISOString();
 
   // #9 evidence gate: re-verify live and record it. Never trust plain PR
-  // existence or an agent self-report as enough to launch reviewers. When the run
-  // is isolated (#41) its branch lives in the worktree, so verify against it.
+  // existence or an agent self-report as enough to launch reviewers. Verify
+  // against the run's recorded branch (the bound #38 evidence) for both shared and
+  // worktree runs: an isolated run's branch lives in its worktree, and a shared run
+  // can have a checkout that isn't on the PR branch, so the local branch is never
+  // authoritative once a PR branch is bound.
   const verification = await getCommitVerification(
     projectRoot,
-    { expectedCommit: run.expectedCommit, branch: run.worktree ? run.branch : undefined },
+    { expectedCommit: run.expectedCommit, branch: run.branch },
     now,
   );
 
@@ -1195,11 +1225,13 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
   const now = new Date().toISOString();
 
   // #9 evidence gate: re-verify live and record it. The merge gate consumes this
-  // verified status, not plain PR existence or an agent self-report. An isolated
-  // run (#41) is verified against its worktree branch.
+  // verified status, not plain PR existence or an agent self-report. Verify against
+  // the run's recorded branch (the bound #38 evidence) for both shared and worktree
+  // runs — the operator's current checkout is never authoritative once a PR branch
+  // is bound.
   const verification = await getCommitVerification(
     projectRoot,
-    { expectedCommit: run.expectedCommit, branch: run.worktree ? run.branch : undefined },
+    { expectedCommit: run.expectedCommit, branch: run.branch },
     now,
   );
 
@@ -1505,7 +1537,7 @@ function configureLoop(): void {
       const run = getCurrentRun();
       return getCommitVerification(
         getSelectedProjectRoot(),
-        { expectedCommit: run?.expectedCommit, branch: run?.worktree ? run.branch : undefined },
+        { expectedCommit: run?.expectedCommit, branch: run?.branch },
         new Date().toISOString(),
       );
     },
