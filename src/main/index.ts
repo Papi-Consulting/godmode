@@ -737,14 +737,27 @@ async function handleResume(): Promise<RunResumeResult> {
       restored = recordCurrentRunVerification(verification) ?? restored;
       const mismatch = prMismatchReason(restored.prNumber, verification);
       if (mismatch) {
-        const flagged = dispatchRunAction('flag_needs_human', {
-          reason: `Resumed run revalidation: ${mismatch}`,
-          actor: 'operator',
-        });
-        if (flagged.ok) {
-          restored = flagged.run;
+        if (restored.status === 'needs_human') {
+          // Already parked for a human (e.g. persisted mid-escalation): surface
+          // the mismatch reason without a redundant (and illegal) self-transition.
           routedToNeedsHuman = true;
           note = mismatch;
+        } else {
+          // Every non-terminal status that can carry a recorded PR now has a legal
+          // `flag_needs_human` edge (see run.ts recovery edges), so this routes
+          // rather than silently leaving the run continuing blind.
+          const flagged = dispatchRunAction('flag_needs_human', {
+            reason: `Resumed run revalidation: ${mismatch}`,
+            actor: 'operator',
+          });
+          if (flagged.ok) {
+            restored = flagged.run;
+            routedToNeedsHuman = true;
+            note = mismatch;
+          } else {
+            // Defensive: should be unreachable, but never hide a real mismatch.
+            note = `Recorded PR mismatch on resume (${mismatch}) could not be routed to needs_human from status "${restored.status}".`;
+          }
         }
       }
     }

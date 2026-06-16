@@ -261,6 +261,70 @@ test('cancel from paused clears the resume target', () => {
   assert.equal(cancelled.resumeStatus, undefined);
 });
 
+test('flag_needs_human is legal from paused so a resumed PR mismatch can escalate (issue #40)', () => {
+  // Reproduce a run paused after PR discovery (carries a prNumber), as it would be
+  // persisted and then resumed after the recorded PR is closed/deleted/replaced.
+  const paused = applyAction(
+    advance(createRun({ issueNumber: 40, now: NOW, id: 'run-resume-pr' }), [
+      'select_issue',
+      'mark_ready',
+      'start_builder',
+      'open_pr',
+    ]),
+    'pause',
+    { now: NOW, reason: 'restart' },
+  ).run;
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.resumeStatus, 'pr_opened');
+
+  // The resume-revalidation routing must succeed (previously this transition was
+  // rejected and the failure was silently swallowed, leaving the run blind).
+  const flagged = applyAction(paused, 'flag_needs_human', {
+    now: NOW,
+    reason: 'Resumed run revalidation: the recorded PR #54 is closed on GitHub, not open.',
+  });
+  assert.equal(flagged.ok, true);
+  assert.equal(flagged.run.status, 'needs_human');
+  assert.equal(flagged.run.reason, 'Resumed run revalidation: the recorded PR #54 is closed on GitHub, not open.');
+  // Moving out of paused clears the dangling resume target.
+  assert.equal(flagged.run.resumeStatus, undefined);
+});
+
+test('flag_needs_human is legal from the agent_failed and max_cycles_exceeded recovery states (issue #40)', () => {
+  const failed = applyAction(
+    advance(createRun({ issueNumber: 41, now: NOW, id: 'run-af-nh' }), [
+      'select_issue',
+      'mark_ready',
+      'start_builder',
+      'open_pr',
+    ]),
+    'report_agent_failed',
+    { now: NOW, reason: 'crash' },
+  ).run;
+  assert.equal(failed.status, 'agent_failed');
+  const failedFlagged = applyAction(failed, 'flag_needs_human', { now: NOW, reason: 'mismatch' });
+  assert.equal(failedFlagged.ok, true);
+  assert.equal(failedFlagged.run.status, 'needs_human');
+
+  const exceeded = applyAction(
+    advance(createRun({ issueNumber: 42, now: NOW, id: 'run-mc-nh' }), [
+      'select_issue',
+      'mark_ready',
+      'start_builder',
+      'open_pr',
+      'start_reviewers',
+      'synthesize_reviews',
+      'request_fix',
+    ]),
+    'exceed_max_cycles',
+    { now: NOW, reason: 'looping' },
+  ).run;
+  assert.equal(exceeded.status, 'max_cycles_exceeded');
+  const exceededFlagged = applyAction(exceeded, 'flag_needs_human', { now: NOW, reason: 'mismatch' });
+  assert.equal(exceededFlagged.ok, true);
+  assert.equal(exceededFlagged.run.status, 'needs_human');
+});
+
 test('flag_needs_human records reason and blocker, cleared on recovery', () => {
   const synth = advance(createRun({ issueNumber: 5, now: NOW, id: 'run-nh' }), [
     'select_issue',

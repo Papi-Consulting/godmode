@@ -96,17 +96,32 @@ const FORWARD_EDGES: Record<RunStatus, Partial<Record<RunAction, RunStatus>>> = 
   },
   // Human-merged: the only thing left is to file the run away.
   karan_merged: { close: 'closed' },
-  // Recovery states: the operator decides how to proceed.
+  // Recovery states: the operator decides how to proceed. Each carries a
+  // `flag_needs_human` edge so a recorded-PR mismatch discovered on resume (issue
+  // #40) can always be routed to `needs_human` with a visible reason — a resumed
+  // run that was persisted in one of these states (with a `prNumber`) must never
+  // continue blind because the escalation transition was illegal.
   needs_human: {
     mark_ready: 'ready_to_build',
     mark_merge_ready: 'merge_ready',
     cancel: 'cancelled',
     close: 'closed',
   },
-  agent_failed: { mark_ready: 'ready_to_build', cancel: 'cancelled', close: 'closed' },
-  max_cycles_exceeded: { mark_merge_ready: 'merge_ready', cancel: 'cancelled', close: 'closed' },
-  // `resume` is handled dynamically; cancel is the only static escape.
-  paused: { cancel: 'cancelled' },
+  agent_failed: {
+    mark_ready: 'ready_to_build',
+    flag_needs_human: 'needs_human',
+    cancel: 'cancelled',
+    close: 'closed',
+  },
+  max_cycles_exceeded: {
+    mark_merge_ready: 'merge_ready',
+    flag_needs_human: 'needs_human',
+    cancel: 'cancelled',
+    close: 'closed',
+  },
+  // `resume` is handled dynamically; `flag_needs_human` lets resume-revalidation
+  // escalate a paused-but-mismatched run, and cancel is the static escape.
+  paused: { flag_needs_human: 'needs_human', cancel: 'cancelled' },
   cancelled: { close: 'closed' },
   closed: {},
 };
