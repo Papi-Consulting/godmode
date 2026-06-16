@@ -870,6 +870,72 @@ export type ClearRunResult =
   | { ok: true; run: null }
   | { ok: false; error: string; run: RunSnapshot };
 
+// --- Run persistence / resume after restart (issue #40) ----------------------
+
+/**
+ * Which persistence backend is holding the operated project's run state (issue
+ * #40). SQLite (`better-sqlite3`) is preferred; `json` is the interface-preserving
+ * file fallback used when the native module cannot load (e.g. an Electron ABI
+ * mismatch without `electron-rebuild`). `none` means no store has been opened yet.
+ */
+export type RunStorageBackend = 'sqlite' | 'json' | 'none';
+
+/**
+ * Visible health of the run-persistence layer (issue #40). When a write fails
+ * (e.g. a read-only operated project), GodMode keeps operating in-memory and
+ * flips `degraded` with a one-time `message` so the operator knows the run will
+ * not survive a restart — the app never crashes or silently pretends to persist.
+ */
+export type RunStorageStatus = {
+  backend: RunStorageBackend;
+  /** True once a persistence write has failed this session for the active project. */
+  degraded: boolean;
+  /** Human-readable reason persistence is degraded, when relevant. */
+  message?: string;
+};
+
+/**
+ * An unfinished run found persisted for the selected operated project (issue #40).
+ * Surfaced as an explicit Resume/Discard choice on project select — GodMode never
+ * auto-resumes. The full stored snapshot is carried so the offer can show the
+ * status, issue, branch/PR, and cycle the operator is deciding about.
+ */
+export type RunResumeOffer = {
+  run: RunSnapshot;
+  /** Backend the offered run was loaded from. */
+  storage: RunStorageBackend;
+};
+
+/**
+ * The renderer-facing resume surface for the selected project (issue #40):
+ * whether an unfinished run is available to resume, plus the storage health so a
+ * degraded (in-memory-only) state is visible. `offer` is null when no unfinished
+ * run exists or a run is already active in memory (the offer is mutually
+ * exclusive with an active run).
+ */
+export type RunResumeState = {
+  offer: RunResumeOffer | null;
+  storage: RunStorageStatus;
+};
+
+/**
+ * Result of resuming a persisted run (issue #40). On success the restored
+ * snapshot is returned with all previously-live sessions marked dead/stale and
+ * `availableActions` recomputed. `routedToNeedsHuman` is true when revalidation
+ * found the recorded PR no longer matches reality and the resumed run was routed
+ * to `needs_human` with a visible `note` instead of continuing blind.
+ */
+export type RunResumeResult =
+  | { ok: true; run: RunSnapshot; routedToNeedsHuman: boolean; note?: string }
+  | { ok: false; code: 'no_offer' | 'invalid'; error: string };
+
+/**
+ * Result of discarding a persisted run (issue #40). Discard archives the run
+ * (kept in the store as history, never silently deleted) and returns to a clean
+ * no-run state. A failure to archive is surfaced but never blocks starting fresh.
+ */
+export type RunDiscardResult = { ok: boolean; error?: string };
+
 /**
  * The reviewed builder handoff for the current run: the exact prompt GodMode
  * would write into the configured builder session, bound to the selected

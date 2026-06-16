@@ -34,6 +34,11 @@ export const GODMODE_IPC = {
   runLoopGet: 'godmode:run:loop:get',
   runLoopSetMode: 'godmode:run:loop:set-mode',
   runLoopChanged: 'godmode:run:loop:changed',
+  // Run persistence / resume-after-restart (issue #40).
+  runResumeGet: 'godmode:run:resume:get',
+  runResume: 'godmode:run:resume:apply',
+  runDiscard: 'godmode:run:resume:discard',
+  runResumeChanged: 'godmode:run:resume:changed',
   worktreeList: 'godmode:worktree:list',
   worktreeCleanup: 'godmode:worktree:cleanup',
   ptyStart: 'godmode:pty:start',

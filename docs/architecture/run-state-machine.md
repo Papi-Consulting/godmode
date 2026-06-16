@@ -25,9 +25,16 @@ not plain PR existence — see `docs/architecture/commit-verification.md`.
 
 The pure core (`createRun`, `applyAction`, `computeAvailableActions`,
 `TRANSITION_TABLE`) is Electron-free and unit-tested directly
-(`test/run.test.js`). The mutable controller holds one run in memory for v1; the
-snapshot is plain serializable data, so it can later persist to `.godmode/runs/`
-or SQLite without reshaping.
+(`test/run.test.js`). The mutable controller holds one run in memory and funnels
+every accepted mutation through a single setter that fires a **write-through
+persistence hook** (issue #40): the snapshot is plain serializable data and is
+persisted to the per-operated-project run store (`.godmode/godmode.db`) on each
+accepted transition, with the latest snapshot also mirrored to human-readable
+`.godmode/runs/<run-id>/run.json`. Rejected transitions return the unchanged run
+and never reach the setter, so they are never persisted. On relaunch a persisted
+unfinished run is offered for Resume (`adoptResumedRun` restores it, marking live
+sessions dead and recomputing `availableActions`) or Discard. See
+`docs/architecture/run-persistence.md`.
 
 ## The guard
 

@@ -23,6 +23,9 @@ import type {
   RunAction,
   RunActionResult,
   RunBlockerKind,
+  RunDiscardResult,
+  RunResumeResult,
+  RunResumeState,
   RunSnapshot,
   RunVerificationResult,
   StartReviewersResult,
@@ -91,6 +94,15 @@ const api = {
     expectedCommit?: string;
   }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
   clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<ClearRunResult>,
+  // Run persistence / resume after restart (issue #40).
+  getResumeState: () => ipcRenderer.invoke(GODMODE_IPC.runResumeGet) as Promise<RunResumeState>,
+  resumeRun: () => ipcRenderer.invoke(GODMODE_IPC.runResume) as Promise<RunResumeResult>,
+  discardRun: () => ipcRenderer.invoke(GODMODE_IPC.runDiscard) as Promise<RunDiscardResult>,
+  onResumeChanged: (callback: (state: RunResumeState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: RunResumeState) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runResumeChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runResumeChanged, listener);
+  },
   onProjectChanged: (callback: (state: ProjectState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProjectState) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.projectChanged, listener);
