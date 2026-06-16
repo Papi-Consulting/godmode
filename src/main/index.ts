@@ -42,6 +42,7 @@ import {
   tickLoop,
 } from './loop.js';
 import {
+  adoptResumedRun,
   clearRun,
   dispatchRunAction,
   evaluateClearRun,
@@ -55,8 +56,16 @@ import {
   setCurrentRunIsolation,
   setCurrentRunReviewers,
   setCurrentRunWorktree,
+  setRunPersistHook,
   updateCurrentRunReviewer,
 } from './run.js';
+import {
+  archiveRun,
+  loadUnfinishedRun,
+  preferredBackendKind,
+  saveRun,
+  storeBackendKind,
+} from './store.js';
 import {
   createWorktree,
   deriveWorktreePlan,
@@ -74,6 +83,7 @@ import {
   reviewerArtifactPath,
   reviewerArtifactRelPath,
   writeRunFindings,
+  writeRunSnapshot,
 } from './artifacts.js';
 import {
   acceptedBlockers,
@@ -97,6 +107,7 @@ import type {
   AgentRole,
   BuilderHandoff,
   ClearRunResult,
+  CommitVerification,
   ConfirmPrCandidateResult,
   HandoffSendResult,
   LoopMode,
@@ -107,9 +118,13 @@ import type {
   ReviewSynthesisResult,
   ReviewerCommentResult,
   ReviewerResult,
+  RunDiscardResult,
   RunFindings,
+  RunResumeResult,
+  RunResumeState,
   RunSnapshot,
   RunSourceDetail,
+  RunStorageStatus,
   RunVerificationResult,
   RunWorktree,
   StartReviewersResult,
@@ -216,6 +231,15 @@ function isTrustedDevServerUrl(value: string): boolean {
 
 let mainWindow: BrowserWindow | null = null;
 
+// --- Run persistence health (issue #40) --------------------------------------
+// Whether the last persistence write succeeded, the backend in use, and a
+// one-time human-readable reason when it failed. Degradation is per-operated
+// project: it is reset on a project switch so a read-only project's warning never
+// bleeds into the next, writable one.
+let storageBackend: RunStorageStatus['backend'] = 'none';
+let storageDegraded = false;
+let storageMessage: string | undefined;
+
 /**
  * Apply a project selection and, if the root actually changed, tear down any
  * PTY sessions still rooted in the previous project. Agent commands must run in
@@ -241,11 +265,20 @@ function selectProjectAndResetSessions(input: string) {
         mainWindow.webContents.send(GODMODE_IPC.ptyExit, { paneId, exit: { exitCode: 0 } });
       }
     }
+    // Persistence health is per-operated-project: reset the degraded banner so a
+    // read-only project's warning never bleeds into the next, writable one (#40).
+    storageDegraded = false;
+    storageMessage = undefined;
+    storageBackend = 'none';
     // Role/agent config is project-local, so the renderer must reload it (panes,
     // labels, command hints) whenever the active root changes.
     if (mainWindow && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send(GODMODE_IPC.projectChanged, state);
     }
+    // The newly selected project may have its own persisted unfinished run — push
+    // the resume offer (or its absence) so the operator is given the explicit
+    // Resume/Discard choice without auto-resuming (issue #40).
+    emitResumeChanged();
   }
 
   return state;
@@ -592,6 +625,192 @@ function emitRunChanged(run: RunSnapshot | null): void {
 /** Push the latest loop-controller state to the run control pane (issue #39). */
 function emitLoopChanged(loop: LoopState): void {
   emitToRenderer(GODMODE_IPC.runLoopChanged, loop);
+}
+
+// --- Run persistence + resume wiring (issue #40) -----------------------------
+
+/** Current storage health for the resume surface. */
+function currentStorageStatus(): RunStorageStatus {
+  return { backend: storageBackend, degraded: storageDegraded, message: storageMessage };
+}
+
+/**
+ * Write-through persistence hook installed on the run controller (issue #40).
+ * Every accepted mutation funnels its new snapshot here: persist it to the
+ * operated project's run store (synchronous, so killing the app right after a
+ * transition loses nothing) and mirror the human-readable `run.json`. A failed
+ * write degrades to in-memory with a one-time visible warning instead of crashing
+ * or pretending to persist. The run belongs to the selected operated project, so
+ * the store lives under that root — never the GodMode app repo, unless it *is* the
+ * operated project (dogfooding).
+ */
+function persistCurrentRun(run: RunSnapshot): void {
+  const root = getSelectedProjectRoot();
+  const result = saveRun(root, run);
+  storageBackend = result.backend;
+  if (!result.ok) {
+    if (!storageDegraded) {
+      storageDegraded = true;
+      storageMessage =
+        `Run state could not be persisted (${result.error}). GodMode will keep running, ` +
+        'but this run will not survive a restart until the operated project is writable.';
+      emitResumeChanged();
+    }
+  } else if (storageDegraded) {
+    // A later write succeeded — clear the degraded banner so it is not sticky.
+    storageDegraded = false;
+    storageMessage = undefined;
+    emitResumeChanged();
+  }
+  // Best-effort human-readable mirror alongside the reviewer logs / findings.json.
+  writeRunSnapshot(root, run.id, run);
+}
+
+/**
+ * The resume surface for the selected project: an unfinished-run offer (mutually
+ * exclusive with an active in-memory run — GodMode never auto-resumes) plus the
+ * storage health so a degraded, in-memory-only state stays visible.
+ */
+function buildResumeState(): RunResumeState {
+  const root = getSelectedProjectRoot();
+  if (getCurrentRun()) {
+    storageBackend = storeBackendKind(root);
+    return { offer: null, storage: currentStorageStatus() };
+  }
+  const loaded = loadUnfinishedRun(root);
+  storageBackend = loaded ? loaded.backend : preferredBackendKind();
+  return {
+    offer: loaded ? { run: loaded.run, storage: loaded.backend } : null,
+    storage: currentStorageStatus(),
+  };
+}
+
+/** Push the resume surface to the renderer (project switch, save failure, resume/discard). */
+function emitResumeChanged(): void {
+  emitToRenderer(GODMODE_IPC.runResumeChanged, buildResumeState());
+}
+
+/** Return the resume surface for the selected project (issue #40). */
+function handleGetResume(): RunResumeState {
+  return buildResumeState();
+}
+
+/**
+ * Resume the persisted unfinished run for the selected project (issue #40). The
+ * snapshot is restored through the normal model — previously-live PTY/reviewer
+ * sessions are marked dead/stale and `availableActions` is recomputed — and then
+ * revalidated against reality: if the recorded PR no longer matches what GitHub
+ * reports (and GitHub is reachable), the resumed run is routed to `needs_human`
+ * with a visible reason instead of continuing blind. Never auto-resumes; only
+ * runs on the explicit operator choice.
+ */
+async function handleResume(): Promise<RunResumeResult> {
+  if (getCurrentRun()) {
+    return { ok: false, code: 'invalid', error: 'A run is already active; clear it before resuming another.' };
+  }
+  const root = getSelectedProjectRoot();
+  const loaded = loadUnfinishedRun(root);
+  if (!loaded) {
+    return { ok: false, code: 'no_offer', error: 'There is no unfinished run to resume for this project.' };
+  }
+
+  // Restore through the state machine: dead sessions + recomputed actions.
+  let restored = adoptResumedRun(loaded.run);
+  // A resumed run starts supervised by the operator: reset the loop controller so
+  // no stale auto-mode/watcher carries across the restart (it re-arms on request).
+  resetLoopController();
+
+  // Revalidate the recorded PR against reality with the read-only evidence gate.
+  // Only a *definitive* mismatch routes to needs_human; an unreachable GitHub
+  // (partial/needs_refresh) is surfaced but does not blindly escalate.
+  let routedToNeedsHuman = false;
+  let note: string | undefined;
+  if (restored.prNumber !== undefined && !isTerminalStatus(restored.status)) {
+    const verification = await getCommitVerification(
+      root,
+      { expectedCommit: restored.expectedCommit, branch: restored.branch },
+      new Date().toISOString(),
+    );
+    // Re-confirm we still own this run/root after the await.
+    const live = getCurrentRun();
+    if (live && live.id === restored.id && getSelectedProjectRoot() === root) {
+      restored = recordCurrentRunVerification(verification) ?? restored;
+      const mismatch = prMismatchReason(restored.prNumber, verification);
+      if (mismatch) {
+        if (restored.status === 'needs_human') {
+          // Already parked for a human (e.g. persisted mid-escalation): surface
+          // the mismatch reason without a redundant (and illegal) self-transition.
+          routedToNeedsHuman = true;
+          note = mismatch;
+        } else {
+          // Every non-terminal status that can carry a recorded PR now has a legal
+          // `flag_needs_human` edge (see run.ts recovery edges), so this routes
+          // rather than silently leaving the run continuing blind.
+          const flagged = dispatchRunAction('flag_needs_human', {
+            reason: `Resumed run revalidation: ${mismatch}`,
+            actor: 'operator',
+          });
+          if (flagged.ok) {
+            restored = flagged.run;
+            routedToNeedsHuman = true;
+            note = mismatch;
+          } else {
+            // Defensive: should be unreachable, but never hide a real mismatch.
+            note = `Recorded PR mismatch on resume (${mismatch}) could not be routed to needs_human from status "${restored.status}".`;
+          }
+        }
+      }
+    }
+  }
+
+  emitRunChanged(restored);
+  emitResumeChanged();
+  void tickLoop();
+  return { ok: true, run: restored, routedToNeedsHuman, note };
+}
+
+/**
+ * Whether a resumed run's recorded PR no longer matches GitHub reality (issue
+ * #40). Returns a human-readable reason on a definitive mismatch, or null when it
+ * still matches or the evidence is merely incomplete (GitHub unreachable).
+ */
+function prMismatchReason(prNumber: number | undefined, verification: CommitVerification): string | null {
+  if (prNumber === undefined) return null;
+  // Incomplete evidence (gh missing/unauthenticated/network) is not a mismatch.
+  if (verification.partial || verification.status === 'needs_refresh') return null;
+  if (!verification.pr) {
+    return `the recorded PR #${prNumber} could not be found for the run's branch on GitHub.`;
+  }
+  if (verification.pr.number !== prNumber) {
+    return `the branch's PR on GitHub is #${verification.pr.number}, not the recorded #${prNumber}.`;
+  }
+  if (verification.prState && verification.prState !== 'OPEN' && !verification.mergeConfirmed) {
+    return `the recorded PR #${prNumber} is ${verification.prState.toLowerCase()} on GitHub, not open.`;
+  }
+  return null;
+}
+
+/**
+ * Discard the persisted unfinished run for the selected project (issue #40):
+ * archive it (kept in the store as history — never silently deleted) and clear any
+ * in-memory copy so the dashboard starts clean.
+ */
+function handleDiscard(): RunDiscardResult {
+  const root = getSelectedProjectRoot();
+  const loaded = loadUnfinishedRun(root);
+  if (!loaded) {
+    // Nothing persisted to discard; ensure a clean in-memory slate regardless.
+    clearRun();
+    resetLoopController();
+    emitResumeChanged();
+    return { ok: true };
+  }
+  const archived = archiveRun(root, loaded.run.id);
+  clearRun();
+  resetLoopController();
+  emitRunChanged(null);
+  emitResumeChanged();
+  return archived ? { ok: true } : { ok: false, error: 'The run could not be archived in the store.' };
 }
 
 /**
@@ -1727,6 +1946,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runSetIsolation, handleSetRunIsolation);
   ipcMain.handle(GODMODE_IPC.runLoopGet, handleGetLoop);
   ipcMain.handle(GODMODE_IPC.runLoopSetMode, handleSetLoopMode);
+  ipcMain.handle(GODMODE_IPC.runResumeGet, handleGetResume);
+  ipcMain.handle(GODMODE_IPC.runResume, handleResume);
+  ipcMain.handle(GODMODE_IPC.runDiscard, handleDiscard);
   ipcMain.handle(GODMODE_IPC.worktreeList, handleListWorktrees);
   ipcMain.handle(GODMODE_IPC.worktreeCleanup, handleCleanupWorktree);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
@@ -1737,6 +1959,10 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(() => {
   registerIpcHandlers();
+  // Install the write-through run-persistence hook (issue #40): every accepted run
+  // mutation is persisted to the operated project's run store and mirrored to
+  // run.json. Installed before the window so no early mutation escapes persistence.
+  setRunPersistHook(persistCurrentRun);
   // Wire the deterministic review/fix loop controller (issue #39). It stays a
   // no-op until a run opts into auto mode; manual mode is the regression-safe
   // default.

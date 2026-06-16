@@ -6,5 +6,12 @@ dist/
 !.env.example
 .godmode/runs/
 .godmode/smoke/
+# Per-project run-state store (issue #40): SQLite DB + WAL/SHM/journal sidecars
+# and the JSON fallback. Local persistence artifacts — never committed.
+.godmode/godmode.db
+.godmode/godmode.db-wal
+.godmode/godmode.db-shm
+.godmode/godmode.db-journal
+.godmode/godmode.db.json
 .codegraph/
 *.log

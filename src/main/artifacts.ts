@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { RunFindings } from '../shared/types.js';
+import type { RunFindings, RunSnapshot } from '../shared/types.js';
 
 /**
  * Local run-artifact helpers (issue #10). Reviewer session output is captured to
@@ -102,6 +102,34 @@ export function writeRunFindings(projectRoot: string, runId: string, findings: R
   try {
     ensureRunArtifactDir(projectRoot, runId);
     fs.writeFileSync(runFindingsPath(projectRoot, runId), `${JSON.stringify(findings, null, 2)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `.godmode/runs/<run-id>/run.json` — the human-readable run-snapshot mirror path. */
+export function runSnapshotRelPath(runId: string): string {
+  return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId), 'run.json');
+}
+
+/** Absolute path to a run's `run.json` snapshot mirror under the operated project. */
+export function runSnapshotPath(projectRoot: string, runId: string): string {
+  return path.resolve(projectRoot, '.godmode', 'runs', safeArtifactSegment(runId), 'run.json');
+}
+
+/**
+ * Mirror the latest run snapshot to `.godmode/runs/<run-id>/run.json` (issue #40),
+ * returning whether the write succeeded. Best-effort like {@link writeRunFindings}:
+ * the authoritative persisted copy lives in the run store (`store.ts`); this is the
+ * human-readable mirror alongside the reviewer logs and `findings.json`, written
+ * through the same path-confinement helpers so it stays inside the run dir. A failed
+ * write is reported (so the caller can note it) but never throws.
+ */
+export function writeRunSnapshot(projectRoot: string, runId: string, run: RunSnapshot): boolean {
+  try {
+    ensureRunArtifactDir(projectRoot, runId);
+    fs.writeFileSync(runSnapshotPath(projectRoot, runId), `${JSON.stringify(run, null, 2)}\n`);
     return true;
   } catch {
     return false;

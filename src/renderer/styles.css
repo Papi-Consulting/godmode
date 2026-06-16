@@ -587,6 +587,28 @@ p {
   margin-top: 6px;
 }
 
+/* Resume-after-restart offer (issue #40). */
+.run-resume-offer {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.run-resume-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 0.7rem;
+  color: var(--text-soft);
+}
+
+.run-resume-offer .run-actions {
+  margin-top: 8px;
+}
+
 .run-loop {
   margin: 8px 0;
   padding: 8px 10px;

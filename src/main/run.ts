@@ -96,17 +96,32 @@ const FORWARD_EDGES: Record<RunStatus, Partial<Record<RunAction, RunStatus>>> = 
   },
   // Human-merged: the only thing left is to file the run away.
   karan_merged: { close: 'closed' },
-  // Recovery states: the operator decides how to proceed.
+  // Recovery states: the operator decides how to proceed. Each carries a
+  // `flag_needs_human` edge so a recorded-PR mismatch discovered on resume (issue
+  // #40) can always be routed to `needs_human` with a visible reason — a resumed
+  // run that was persisted in one of these states (with a `prNumber`) must never
+  // continue blind because the escalation transition was illegal.
   needs_human: {
     mark_ready: 'ready_to_build',
     mark_merge_ready: 'merge_ready',
     cancel: 'cancelled',
     close: 'closed',
   },
-  agent_failed: { mark_ready: 'ready_to_build', cancel: 'cancelled', close: 'closed' },
-  max_cycles_exceeded: { mark_merge_ready: 'merge_ready', cancel: 'cancelled', close: 'closed' },
-  // `resume` is handled dynamically; cancel is the only static escape.
-  paused: { cancel: 'cancelled' },
+  agent_failed: {
+    mark_ready: 'ready_to_build',
+    flag_needs_human: 'needs_human',
+    cancel: 'cancelled',
+    close: 'closed',
+  },
+  max_cycles_exceeded: {
+    mark_merge_ready: 'merge_ready',
+    flag_needs_human: 'needs_human',
+    cancel: 'cancelled',
+    close: 'closed',
+  },
+  // `resume` is handled dynamically; `flag_needs_human` lets resume-revalidation
+  // escalate a paused-but-mismatched run, and cancel is the static escape.
+  paused: { flag_needs_human: 'needs_human', cancel: 'cancelled' },
   cancelled: { close: 'closed' },
   closed: {},
 };
@@ -333,9 +348,37 @@ export function createRun(input: CreateRunInput = {}): RunSnapshot {
   return run;
 }
 
-// --- Mutable single-run controller (in-memory for this issue) ----------------
+// --- Mutable single-run controller -------------------------------------------
 
 let currentRun: RunSnapshot | null = null;
+
+/**
+ * Write-through persistence hook (issue #40). The Electron/index wiring installs
+ * a hook that persists every accepted mutation to the operated project's run
+ * store; run.ts stays Electron/storage-free and just calls back through this
+ * opaque callback. Fired only with a non-null snapshot — clearing the in-memory
+ * run (e.g. on project switch) deliberately does NOT touch the persisted record,
+ * so the run survives to be offered for resume when the project is reselected.
+ */
+export type RunPersistHook = (run: RunSnapshot) => void;
+
+let persistHook: RunPersistHook | null = null;
+
+/** Install (or clear with null) the write-through persistence hook (issue #40). */
+export function setRunPersistHook(hook: RunPersistHook | null): void {
+  persistHook = hook;
+}
+
+/**
+ * The single funnel for replacing the current run. Every accepted mutation routes
+ * its new snapshot through here so persistence can never be forgotten by one code
+ * path — a rejected transition never calls this (it returns the unchanged run),
+ * so illegal/rejected transitions are never persisted (issue #40 acceptance).
+ */
+function setCurrentRun(run: RunSnapshot): void {
+  currentRun = run;
+  persistHook?.(run);
+}
 
 /**
  * Finished lifecycle states. A run in one of these is "done" — its log is final,
@@ -374,7 +417,7 @@ export function selectIssueRun(input: CreateRunInput): RunActionResult {
   }
   const created = createRun(input);
   const result = applyAction(created, 'select_issue', { now: created.createdAt });
-  if (result.ok) currentRun = result.run;
+  if (result.ok) setCurrentRun(result.run);
   return result;
 }
 
@@ -420,7 +463,7 @@ export function selectManualTaskRun(input: SelectManualTaskInput): RunActionResu
     now: input.now,
   });
   const result = applyAction(created, 'select_issue', { now: created.createdAt });
-  if (result.ok) currentRun = result.run;
+  if (result.ok) setCurrentRun(result.run);
   return result;
 }
 
@@ -434,7 +477,7 @@ export function dispatchRunAction(action: RunAction, options: ApplyActionOptions
     return { ok: false, code: 'no_run', error: 'There is no active run to act on.', run: null };
   }
   const result = applyAction(currentRun, action, options);
-  if (result.ok) currentRun = result.run;
+  if (result.ok) setCurrentRun(result.run);
   return result;
 }
 
@@ -472,7 +515,7 @@ export function recordPromptSent(run: RunSnapshot, input: RecordPromptInput): Ru
  */
 export function recordCurrentRunPrompt(input: RecordPromptInput): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = recordPromptSent(currentRun, input);
+  setCurrentRun(recordPromptSent(currentRun, input));
   return currentRun;
 }
 
@@ -504,7 +547,7 @@ export function recordVerification(run: RunSnapshot, verification: CommitVerific
  */
 export function recordCurrentRunVerification(verification: CommitVerification): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = recordVerification(currentRun, verification);
+  setCurrentRun(recordVerification(currentRun, verification));
   return currentRun;
 }
 
@@ -557,7 +600,7 @@ export function setCurrentRunReviewers(
   now?: string,
 ): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = setReviewerSessions(currentRun, sessions, now);
+  setCurrentRun(setReviewerSessions(currentRun, sessions, now));
   return currentRun;
 }
 
@@ -571,7 +614,7 @@ export function updateCurrentRunReviewer(
   now?: string,
 ): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = updateReviewerSession(currentRun, paneId, patch, now);
+  setCurrentRun(updateReviewerSession(currentRun, paneId, patch, now));
   return currentRun;
 }
 
@@ -592,7 +635,7 @@ export function setRunFindings(run: RunSnapshot, findings: RunFindings, now?: st
  */
 export function setCurrentRunFindings(findings: RunFindings, now?: string): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = setRunFindings(currentRun, findings, now);
+  setCurrentRun(setRunFindings(currentRun, findings, now));
   return currentRun;
 }
 
@@ -610,7 +653,7 @@ export function setRunIsolation(run: RunSnapshot, isolation: WorkspaceIsolation,
 /** Set the current run's isolation (controller wrapper). Null when no active run. */
 export function setCurrentRunIsolation(isolation: WorkspaceIsolation, now?: string): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = setRunIsolation(currentRun, isolation, now);
+  setCurrentRun(setRunIsolation(currentRun, isolation, now));
   return currentRun;
 }
 
@@ -633,7 +676,7 @@ export function setRunWorktree(run: RunSnapshot, worktree: RunWorktree | null, n
 /** Set/clear the current run's worktree (controller wrapper). Null when no run. */
 export function setCurrentRunWorktree(worktree: RunWorktree | null, now?: string): RunSnapshot | null {
   if (!currentRun) return null;
-  currentRun = setRunWorktree(currentRun, worktree, now);
+  setCurrentRun(setRunWorktree(currentRun, worktree, now));
   return currentRun;
 }
 
@@ -676,11 +719,73 @@ export function evaluateClearRun(
 }
 
 /**
+ * Reviewer session statuses that represent a *live* session — one that cannot
+ * survive an app restart. On resume these are marked `failed` with a restart
+ * reason; already-terminal sessions (`completed`/`comment_posted`/`failed`) are
+ * left intact so their captured outcome is preserved (issue #40).
+ */
+const LIVE_REVIEWER_STATUSES: ReadonlySet<ReviewerSessionState['status']> = new Set([
+  'idle',
+  'launching',
+  'running',
+]);
+
+/** Visible reason stamped on a reviewer session that did not survive a restart. */
+export const RESUMED_SESSION_DEAD_REASON =
+  'Reviewer session did not survive the app restart; relaunch reviewers or synthesize from the captured artifacts.';
+
+/**
+ * Mark every previously-live PTY/reviewer session on a snapshot as dead (issue
+ * #40). Live-session state (terminal PTYs, running reviewers) cannot be restored
+ * across a restart, so a resumed run must never wait on a session that no longer
+ * exists. Pure: returns a new snapshot; sessions already in a terminal state are
+ * left untouched so their captured output/markers remain valid evidence.
+ */
+export function markRunSessionsDead(run: RunSnapshot, now?: string): RunSnapshot {
+  if (!run.reviewers || run.reviewers.length === 0) return run;
+  const at = now ?? new Date().toISOString();
+  let changed = false;
+  const reviewers = run.reviewers.map((session) => {
+    if (!LIVE_REVIEWER_STATUSES.has(session.status)) return session;
+    changed = true;
+    return {
+      ...session,
+      status: 'failed' as ReviewerSessionState['status'],
+      error: session.error ?? RESUMED_SESSION_DEAD_REASON,
+      pid: undefined,
+      updatedAt: at,
+    };
+  });
+  return changed ? { ...run, reviewers, updatedAt: at } : run;
+}
+
+/**
+ * Adopt a persisted snapshot as the current run on resume (issue #40). Restores
+ * it through the normal model: previously-live sessions are marked dead, and
+ * `availableActions` is recomputed from the transition table so the operator sees
+ * exactly what is legal/relaunchable from the restored state — never a stale
+ * action set captured before the restart. Persists the restored snapshot through
+ * the write-through hook so the dead-session marking is durable. The transition
+ * log is carried forward intact. Returns the adopted snapshot.
+ */
+export function adoptResumedRun(run: RunSnapshot, now?: string): RunSnapshot {
+  const revived = markRunSessionsDead(run, now);
+  const restored: RunSnapshot = { ...revived, availableActions: computeAvailableActions(revived) };
+  setCurrentRun(restored);
+  return restored;
+}
+
+/**
  * Discard the current run entirely (the "cleared" outcome): the dashboard returns
  * to a no-run state. Distinct from the `close` action, which records a terminal
  * `closed` status while keeping the run and its log visible. The operator-facing
  * guard ({@link evaluateClearRun}) lives in the IPC handler; this low-level reset
  * is also used internally (e.g. on project switch) and is unconditional.
+ *
+ * This intentionally does NOT touch the persisted store (issue #40): clearing the
+ * in-memory run on a project switch must leave the persisted record so the run is
+ * still offered for resume when the project is reselected. Permanent removal from
+ * the resume offer is the explicit Discard/archive path in `store.ts`.
  */
 export function clearRun(): void {
   currentRun = null;

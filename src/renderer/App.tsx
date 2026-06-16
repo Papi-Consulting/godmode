@@ -13,6 +13,7 @@ import type {
   ProjectState,
   RolePaneConfig,
   RunAction,
+  RunResumeState,
   RunSnapshot,
   RunStatus,
   WorkspaceIsolation,
@@ -83,6 +84,8 @@ export function App() {
   const [worktreeMessage, setWorktreeMessage] = useState<string | null>(null);
   const [run, setRun] = useState<RunSnapshot | null>(null);
   const [loop, setLoop] = useState<LoopState | null>(null);
+  const [resumeState, setResumeState] = useState<RunResumeState | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
@@ -118,6 +121,49 @@ export function App() {
     const next = await window.godmode.getLoop();
     setLoop(next ?? null);
   }, []);
+
+  // Fetch the persisted-run resume surface for the selected project (issue #40).
+  // Main keeps the offer mutually exclusive with an active run, so this drives the
+  // Resume/Discard prompt and the storage-degraded banner.
+  const refreshResume = useCallback(async () => {
+    if (!window.godmode?.getResumeState) return;
+    const next = await window.godmode.getResumeState();
+    setResumeState(next ?? null);
+  }, []);
+
+  // Resume the persisted unfinished run. Main restores it through the state machine
+  // (dead sessions, recomputed actions) and revalidates the PR; we adopt whatever
+  // snapshot it returns as authoritative.
+  const resumeRun = useCallback(async () => {
+    if (!window.godmode?.resumeRun) return;
+    setResumeBusy(true);
+    try {
+      const result = await window.godmode.resumeRun();
+      if (result.ok) {
+        setRun(result.run);
+        setRunError(result.routedToNeedsHuman && result.note ? `Resumed and flagged for human: ${result.note}` : null);
+      } else {
+        setRunError(result.error);
+      }
+    } finally {
+      setResumeBusy(false);
+      void refreshResume();
+    }
+  }, [refreshResume]);
+
+  // Discard (archive) the persisted unfinished run and start clean (issue #40).
+  const discardRun = useCallback(async () => {
+    if (!window.godmode?.discardRun) return;
+    setResumeBusy(true);
+    try {
+      const result = await window.godmode.discardRun();
+      setRun(null);
+      setRunError(result.ok ? null : (result.error ?? 'Could not discard the persisted run.'));
+    } finally {
+      setResumeBusy(false);
+      void refreshResume();
+    }
+  }, [refreshResume]);
 
   // Toggle the run's loop mode (manual/auto). Main is authoritative: it returns
   // the new loop state (or a typed rejection when there is no run).
@@ -384,6 +430,7 @@ export function App() {
   useEffect(() => {
     void refreshRun();
     void refreshLoop();
+    void refreshResume();
     // A run is scoped to its operated project; main discards it on project
     // change. Invalidate any in-flight fetch and clear the stale snapshot
     // immediately so the previous project's run never lingers, then re-fetch.
@@ -402,8 +449,12 @@ export function App() {
       // any stale candidate/hint so the previous repo's discovery never lingers.
       setDiscovery(null);
       setDiscoveryHint(null);
+      // The resume offer is scoped to the operated project; clear and re-fetch so
+      // the previous repo's persisted run never lingers (issue #40).
+      setResumeState(null);
       void refreshRun();
       void refreshLoop();
+      void refreshResume();
     });
     // Main pushes the run snapshot when async reviewer lifecycle changes (a
     // reviewer session exits, a marker comment posts/fails). Treat it as the
@@ -421,6 +472,14 @@ export function App() {
       }
       // A run change may have created/cleared the run worktree — refresh the list.
       void refreshWorktrees();
+      // A run starting/clearing flips whether a resume offer is shown (it is
+      // mutually exclusive with an active run); re-fetch so it stays in sync (#40).
+      void refreshResume();
+    });
+    // Main pushes the resume surface on project switch, save failure, and
+    // resume/discard (issue #40). Treat it as authoritative.
+    const offResume = window.godmode?.onResumeChanged((next) => {
+      setResumeState(next ?? null);
     });
     // Main pushes a discovery pass it initiated itself (issue #38) — after the
     // builder PTY exits during builder_running — with a non-blocking hint. PTY exit
@@ -439,8 +498,9 @@ export function App() {
       offRun?.();
       offLoop?.();
       offPrDiscovered?.();
+      offResume?.();
     };
-  }, [refreshRun, refreshLoop, refreshWorktrees]);
+  }, [refreshRun, refreshLoop, refreshWorktrees, refreshResume]);
 
   useEffect(() => {
     let active = true;
@@ -624,6 +684,10 @@ export function App() {
                 orphanWorktrees={worktrees}
                 onCleanupWorktree={cleanupWorktree}
                 worktreeMessage={worktreeMessage}
+                resumeState={resumeState}
+                onResume={resumeRun}
+                onDiscard={discardRun}
+                resumeBusy={resumeBusy}
               />
               <VerificationPane
                 verification={verification}

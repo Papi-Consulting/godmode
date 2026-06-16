@@ -7,6 +7,7 @@ import type {
   PrDiscoveryResult,
   RunAction,
   RunBlockerKind,
+  RunResumeState,
   RunSnapshot,
   RunStatus,
   WorkspaceIsolation,
@@ -147,6 +148,14 @@ type RunControlPaneProps = {
   onCleanupWorktree: (path: string) => void;
   /** Last worktree action message (cleanup refusal/success), surfaced inline. */
   worktreeMessage: string | null;
+  /** Persisted-run resume offer + storage health for this project (issue #40). */
+  resumeState: RunResumeState | null;
+  /** Resume the persisted unfinished run through the state machine (issue #40). */
+  onResume: () => void;
+  /** Discard (archive) the persisted unfinished run and start clean (issue #40). */
+  onDiscard: () => void;
+  /** Whether a resume/discard request is in flight. */
+  resumeBusy: boolean;
 };
 
 function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
@@ -295,6 +304,10 @@ export function RunControlPane({
   orphanWorktrees,
   onCleanupWorktree,
   worktreeMessage,
+  resumeState,
+  onResume,
+  onDiscard,
+  resumeBusy,
 }: RunControlPaneProps) {
   const [manualPr, setManualPr] = useState('');
   const [manualBranch, setManualBranch] = useState('');
@@ -312,6 +325,11 @@ export function RunControlPane({
   // Orphans = managed worktrees not belonging to the active run (the current run's
   // worktree gets its own cleanup affordance below).
   const orphans = orphanWorktrees.filter((wt) => !wt.isCurrentRun);
+  // Resume offer (issue #40): an unfinished run persisted for this project,
+  // surfaced as an explicit Resume/Discard choice. Main guarantees it is null
+  // while a run is already active, so it only renders in the no-run state.
+  const offer = resumeState?.offer ?? null;
+  const storageDegraded = resumeState?.storage.degraded ?? false;
 
   return (
     <section className="stack-section run-control" aria-label="Run control">
@@ -325,6 +343,13 @@ export function RunControlPane({
       </header>
 
       <div className="run-body">
+        {storageDegraded ? (
+          <p className="run-error" role="alert">
+            {resumeState?.storage.message ??
+              'Run state is not being persisted; this run will not survive a restart.'}
+          </p>
+        ) : null}
+
         {run ? (
           <>
             <dl className="run-state-grid" aria-label="Current run state">
@@ -523,8 +548,56 @@ export function RunControlPane({
           </>
         ) : (
           <div className="run-empty">
-            <p className="empty-line">No active run.</p>
-            <p className="run-hint">Select an open issue from the GitHub pane to start a run.</p>
+            {offer ? (
+              <div className="run-resume-offer" aria-label="Resume run">
+                <p className="run-resume-title">
+                  <span className={`header-chip ${statusTone(offer.run.status)}`}>
+                    {STATUS_LABEL[offer.run.status]}
+                  </span>
+                  Unfinished run found for this project — resume or discard it.
+                </p>
+                <dl className="run-state-grid" aria-label="Persisted run state">
+                  <div>
+                    <dt>Issue</dt>
+                    <dd title={offer.run.issueTitle ?? undefined}>
+                      {offer.run.issueNumber !== undefined ? `#${offer.run.issueNumber}` : offer.run.sourceId}
+                      {offer.run.issueTitle ? ` · ${offer.run.issueTitle}` : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Cycle</dt>
+                    <dd>
+                      {offer.run.cycle}/{offer.run.maxCycles}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Branch</dt>
+                    <dd>{offer.run.branch ?? '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>PR</dt>
+                    <dd>{offer.run.prNumber !== undefined ? `#${offer.run.prNumber}` : '—'}</dd>
+                  </div>
+                </dl>
+                <p className="run-hint">
+                  Resuming restores the run and marks any live agent sessions as dead (they cannot survive a
+                  restart). If the recorded PR no longer matches GitHub, the run is flagged for a human.
+                </p>
+                <div className="run-actions">
+                  <button className="primary-action" onClick={onResume} disabled={resumeBusy}>
+                    {resumeBusy ? 'Resuming…' : 'Resume run'}
+                  </button>
+                  <button className="danger-action" onClick={onDiscard} disabled={resumeBusy}>
+                    Discard
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="empty-line">No active run.</p>
+                <p className="run-hint">Select an open issue from the GitHub pane to start a run.</p>
+              </>
+            )}
             {error ? (
               <p className="run-error" role="alert">
                 {error}
