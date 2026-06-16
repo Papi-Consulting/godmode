@@ -7,6 +7,8 @@ import type {
   LoopMode,
   LoopState,
   ManagedWorktree,
+  PrCandidate,
+  PrDiscoveryResult,
   ProjectConfigState,
   ProjectState,
   RolePaneConfig,
@@ -85,6 +87,9 @@ export function App() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [discovery, setDiscovery] = useState<PrDiscoveryResult | null>(null);
+  const [discoveryHint, setDiscoveryHint] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
   const [startReviewersError, setStartReviewersError] = useState<string | null>(null);
   const [startingReviewers, setStartingReviewers] = useState(false);
   const [fixHandoff, setFixHandoff] = useState<BuilderHandoff | null>(null);
@@ -189,6 +194,8 @@ export function App() {
     setVerification(null);
     setFixHandoff(null);
     setSynthError(null);
+    setDiscovery(null);
+    setDiscoveryHint(null);
   }, []);
 
   // Refresh the operated project's GodMode-managed worktrees (for orphan cleanup).
@@ -235,6 +242,46 @@ export function App() {
       if (result.run) setRun(result.run);
     } finally {
       setVerifying(false);
+    }
+  }, []);
+
+  // Run a read-only "Check for PR" discovery pass for a builder_running run
+  // (issue #38). Main lists open PRs scoped to the operated project and classifies
+  // candidates by issue link / recent-unlinked fallback; the result is non-fatal
+  // (a gh error just shows a message and leaves the run in builder_running).
+  const discoverPr = useCallback(async () => {
+    if (!window.godmode?.discoverPr) return;
+    setDiscovering(true);
+    try {
+      const result = await window.godmode.discoverPr();
+      setDiscovery(result);
+      setDiscoveryHint(null);
+    } finally {
+      setDiscovering(false);
+    }
+  }, []);
+
+  // Confirm a discovered candidate: main binds its branch/number/head commit
+  // through the open_pr guard and immediately runs the #9 verification, returning
+  // both so the run advances to pr_opened and the verification pane updates at once.
+  const confirmPrCandidate = useCallback(async (candidate: PrCandidate) => {
+    if (!window.godmode?.confirmPrCandidate) return;
+    const seq = (runRequestSeq.current += 1);
+    const result = await window.godmode.confirmPrCandidate({
+      prNumber: candidate.number,
+      branch: candidate.headRefName,
+      expectedCommit: candidate.headSha,
+      matchReason: candidate.matchReason,
+    });
+    if (seq !== runRequestSeq.current) return;
+    if (result.run) setRun(result.run);
+    if (result.ok) {
+      setVerification(result.verification);
+      setDiscovery(null);
+      setDiscoveryHint(null);
+      setRunError(null);
+    } else {
+      setRunError(result.error);
     }
   }, []);
 
@@ -351,6 +398,10 @@ export function App() {
       setStartReviewersError(null);
       setFixHandoff(null);
       setSynthError(null);
+      // PR discovery is scoped to the operated project's builder_running run; drop
+      // any stale candidate/hint so the previous repo's discovery never lingers.
+      setDiscovery(null);
+      setDiscoveryHint(null);
       void refreshRun();
       void refreshLoop();
     });
@@ -361,8 +412,22 @@ export function App() {
     const offRun = window.godmode?.onRunChanged((next) => {
       runRequestSeq.current += 1;
       setRun(next ?? null);
+      // Discovery only applies while builder_running; clear it once the run moves
+      // on (e.g. a candidate was confirmed → pr_opened) so stale candidates don't
+      // linger in the pane.
+      if (!next || next.status !== 'builder_running') {
+        setDiscovery(null);
+        setDiscoveryHint(null);
+      }
       // A run change may have created/cleared the run worktree — refresh the list.
       void refreshWorktrees();
+    });
+    // Main pushes a discovery pass it initiated itself (issue #38) — after the
+    // builder PTY exits during builder_running — with a non-blocking hint. PTY exit
+    // never transitions the run; this only surfaces candidates + the hint.
+    const offPrDiscovered = window.godmode?.onPrDiscovered((payload) => {
+      setDiscovery(payload.discovery);
+      setDiscoveryHint(payload.hint ?? null);
     });
     // Main pushes the loop-controller state on every loop change (mode toggle,
     // waiting-on change, halt). Treat it as authoritative (issue #39).
@@ -373,6 +438,7 @@ export function App() {
       offProject?.();
       offRun?.();
       offLoop?.();
+      offPrDiscovered?.();
     };
   }, [refreshRun, refreshLoop, refreshWorktrees]);
 
@@ -548,6 +614,11 @@ export function App() {
                 onSetLoopMode={setLoopMode}
                 onDispatch={dispatchRun}
                 onClear={clearRun}
+                discovery={discovery}
+                discoveryHint={discoveryHint}
+                discovering={discovering}
+                onDiscoverPr={discoverPr}
+                onConfirmCandidate={confirmPrCandidate}
                 isAppRepo={project?.isAppRepo ?? false}
                 onSetIsolation={setIsolation}
                 orphanWorktrees={worktrees}

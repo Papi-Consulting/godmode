@@ -439,6 +439,30 @@ test('applyAction records the run-recorded expected commit from the builder phas
   assert.equal(opened.run.prNumber, 9);
 });
 
+test('evidence-bound open_pr logs the discovery reason without leaving a sticky banner (#38)', () => {
+  const run = createRun({ issueNumber: 38, now: NOW, id: 'run-discover' });
+  const selected = applyAction(run, 'select_issue', { now: NOW }).run;
+  const ready = applyAction(selected, 'mark_ready', { now: NOW }).run;
+  const building = applyAction(ready, 'start_builder', { now: NOW }).run;
+  const reason = 'PR #38 discovered by issue link on branch feat/issue-38 at commit abc1234; bound as open_pr evidence.';
+  const opened = applyAction(building, 'open_pr', {
+    now: NOW,
+    branch: 'feat/issue-38',
+    prNumber: 38,
+    expectedCommit: 'a'.repeat(40),
+    reason,
+  });
+  assert.equal(opened.ok, true);
+  assert.equal(opened.run.status, 'pr_opened');
+  // The transition log names the PR and how it matched (issue #38 contract)...
+  const last = opened.run.log[opened.run.log.length - 1];
+  assert.equal(last.action, 'open_pr');
+  assert.equal(last.reason, reason);
+  // ...but forward progress leaves no sticky warn/blocker reason on the snapshot.
+  assert.equal(opened.run.reason, undefined);
+  assert.equal(opened.run.blocker, undefined);
+});
+
 /** A minimal CommitVerification, as main would hand to the recorder. */
 function verification(overrides = {}) {
   return {

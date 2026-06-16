@@ -67,6 +67,28 @@ Fix loop:
 review_synthesis → builder_fixing → fix_pushed → reviewers_rerunning → review_synthesis
 ```
 
+### Evidence-bound `builder_running → pr_opened` (#38)
+
+The `open_pr` edge is **evidence-bound**: rather than a blind operator click, the
+run control pane discovers the builder's PR from read-only GitHub evidence while
+`builder_running` and confirms it. PR discovery (`discoverRunPrCandidates` in
+`src/main/github.ts`, with pure matching in `src/main/discovery.ts`) lists the
+operated project's open PRs and classifies candidates by issue link (`#N`) or a
+conservative recent-unlinked fallback (open PRs created at/after the handoff send).
+Confirming a candidate dispatches `open_pr` through this same guard with
+`branch`/`prNumber`/expected head commit pre-bound and a transition-log reason that
+names the PR and how it matched, then immediately runs the #9 commit-verification
+gate (`getCommitVerification` → `recordCurrentRunVerification`).
+
+So the transition log can name the PR, `applyAction` records the reason supplied
+for *any* transition (not only the sticky-reason interrupt actions); the sticky
+`run.reason` banner stays governed by `REASON_BEARING_ACTIONS`, so clean forward
+progress never leaves a stale warn/blocker on the snapshot. The builder pane's PTY
+exiting during `builder_running` surfaces a non-blocking hint and triggers one
+discovery pass, but **never** transitions the run by itself. The old evidence-free
+click survives only as a manual fallback, visibly labeled unverified and still
+requiring a PR number. See `docs/architecture/commit-verification.md`.
+
 Review synthesis (#11) is what computes these forward edges from evidence: it
 parses the reviewer sessions into normalized findings, computes the merge gate
 from those findings plus the verified #9 status, and dispatches `synthesize_reviews`

@@ -15,8 +15,10 @@ import type {
   GithubReview,
   GithubState,
   GithubStatus,
+  PrDiscoveryResult,
 } from '../shared/types.js';
 import { deriveVerification, type VerificationEvidence, type VerifiedPr } from './verify.js';
+import { matchPrCandidates, selectPrCandidate, type DiscoveryContext, type DiscoveryPr } from './discovery.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -619,6 +621,89 @@ export async function getCommitVerification(
   }
 
   return verification;
+}
+
+/** How many recent PRs the discovery query inspects (read-only). */
+const DISCOVERY_LIMIT = 20;
+
+/**
+ * Discover the builder's PR for a `builder_running` run from GitHub evidence
+ * (issue #38). Lists the operated project's open PRs with the fields the
+ * evidence-bound `open_pr` transition records (number, branch, head SHA, author,
+ * created-at, title/body for matching), then classifies candidates via the pure
+ * {@link matchPrCandidates}: PRs that link the run's issue (`#N`), plus a
+ * conservative recent-unlinked fallback for PRs created at/after the handoff send.
+ *
+ * Read-only: only `gh pr list … --json …` is issued, scoped to the operated
+ * project root (never the GodMode app repo unless dogfooding makes them the same).
+ * Like the rest of this module it never throws — every failure folds into the
+ * returned `status`/`message` with empty candidates so the run stays in
+ * `builder_running` and the operator sees actionable, non-fatal guidance.
+ * `fetchedAt` is supplied by the caller so the function stays deterministic.
+ */
+export async function discoverRunPrCandidates(
+  projectRoot: string,
+  context: DiscoveryContext,
+  fetchedAt: string,
+): Promise<PrDiscoveryResult> {
+  const cwd = path.resolve(projectRoot);
+  const result = await runGh(
+    [
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--limit',
+      String(DISCOVERY_LIMIT),
+      '--json',
+      'number,title,body,url,headRefName,headRefOid,author,createdAt',
+    ],
+    cwd,
+  );
+  if (!result.ok) {
+    return {
+      status: result.status,
+      message: result.message,
+      issueNumber: context.issueNumber,
+      candidates: [],
+      recommendedPrNumber: null,
+      fetchedAt,
+    };
+  }
+
+  type RawAuthor = { login?: string };
+  type Raw = {
+    number?: number;
+    title?: string;
+    body?: string;
+    url?: string;
+    headRefName?: string;
+    headRefOid?: string;
+    author?: RawAuthor;
+    createdAt?: string;
+  };
+  const prs: DiscoveryPr[] = parseJson<Raw[]>(result.stdout, [])
+    .filter((pr): pr is Raw & { number: number } => typeof pr.number === 'number')
+    .map((pr) => ({
+      number: pr.number,
+      title: pr.title ?? '',
+      body: pr.body ?? '',
+      url: pr.url ?? '',
+      headRefName: pr.headRefName ?? '',
+      headSha: pr.headRefOid ?? '',
+      author: pr.author?.login ?? '',
+      createdAt: pr.createdAt ?? '',
+    }));
+
+  const candidates = matchPrCandidates(prs, context);
+  const selection = selectPrCandidate(candidates);
+  return {
+    status: 'ok',
+    issueNumber: context.issueNumber,
+    candidates,
+    recommendedPrNumber: selection.kind === 'unambiguous' ? selection.candidate.number : null,
+    fetchedAt,
+  };
 }
 
 /** Outcome of posting a PR comment — the one mutating `gh` call in this module. */

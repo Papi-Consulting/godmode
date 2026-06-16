@@ -469,6 +469,90 @@ export type GithubState = {
 };
 
 /**
+ * How a discovered PR was matched to the run (issue #38).
+ * - `issue_link`: the PR title/body references the run's issue (`Closes #N` /
+ *   `Fixes #N` / a bare `#N`) — the strong, explicit-link evidence.
+ * - `recent_unlinked`: a conservative fallback for when the builder forgot the
+ *   link — an open PR created at/after the handoff send time.
+ */
+export type PrCandidateMatchReason = 'issue_link' | 'recent_unlinked';
+
+/**
+ * A pull request discovered as a candidate for binding to a `builder_running`
+ * run (issue #38), with the evidence the evidence-bound `open_pr` transition
+ * records: number, URL, head branch, head commit SHA, author, created-at, and
+ * how it matched. Read-only — produced from `gh pr list`, never agent self-report.
+ */
+export type PrCandidate = {
+  number: number;
+  url: string;
+  /** Head branch of the PR (`headRefName`). */
+  headRefName: string;
+  /** Remote PR head commit SHA (`headRefOid`), bound as the expected commit. */
+  headSha: string;
+  /** PR author login, or '' when unresolved. */
+  author: string;
+  /** ISO timestamp the PR was created. */
+  createdAt: string;
+  title: string;
+  matchReason: PrCandidateMatchReason;
+};
+
+/**
+ * Outcome of discovering the builder's PR for a run from GitHub evidence (issue
+ * #38). Like {@link GithubState} this never throws across IPC: every failure mode
+ * folds into `status`/`message` with empty candidates so the operator gets
+ * actionable, non-fatal guidance and the run stays in `builder_running`.
+ *
+ * `recommendedPrNumber` is the single unambiguous `issue_link` candidate's number
+ * when one exists (the confirmed-pending candidate the UI pre-selects), else null
+ * — multiple candidates or recent-unlinked-only matches require an explicit
+ * operator pick; discovery never auto-selects.
+ */
+export type PrDiscoveryResult = {
+  status: GithubStatus;
+  /** User-readable guidance, set whenever `status` is not `ok`. */
+  message?: string;
+  /** The run's issue number the discovery was scoped to, when one is bound. */
+  issueNumber?: number;
+  candidates: PrCandidate[];
+  /** PR number of the single unambiguous issue-linked candidate, else null. */
+  recommendedPrNumber: number | null;
+  /** ISO timestamp the discovery was produced (main owns the clock). */
+  fetchedAt: string;
+};
+
+/**
+ * Pushed to the renderer on `godmode:run:pr:discovered` (issue #38) when main
+ * runs a discovery pass on its own — specifically after the builder PTY exits
+ * during `builder_running`. Carries a non-blocking `hint` so the cockpit can
+ * prompt "builder session ended — check for PR" without ever transitioning the
+ * run: PTY exit alone never changes run state.
+ */
+export type PrDiscoveryEvent = {
+  /** Non-blocking operator hint, when main initiated the pass (e.g. on builder exit). */
+  hint?: string;
+  discovery: PrDiscoveryResult;
+};
+
+/**
+ * Result of confirming a discovered PR candidate (issue #38): bind its
+ * branch/number/head commit to the run through the `open_pr` guard and
+ * immediately run the #9 commit-verification gate. On success the updated run
+ * (now `pr_opened`, with the evidence recorded and a transition-log entry naming
+ * the PR and how it matched) and the verification are returned; on failure
+ * nothing transitioned and `run` is the unchanged snapshot.
+ */
+export type ConfirmPrCandidateResult =
+  | { ok: true; run: RunSnapshot; verification: CommitVerification }
+  | {
+      ok: false;
+      code: 'no_run' | 'invalid_state' | 'invalid_payload' | 'invalid_transition';
+      error: string;
+      run: RunSnapshot | null;
+    };
+
+/**
  * Outcome of loading `.agentic/godmode.yaml` for the selected project.
  * - `loaded`: config file present and valid; panes come from config.
  * - `default`: no config file found; panes fall back to safe defaults.

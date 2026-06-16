@@ -156,6 +156,38 @@ Reaching `builder_running`
 records that the prompt was *sent*, never that the task succeeded. See
 `docs/architecture/builder-handoff.md`.
 
+### Builder PR discovery
+
+While a run is `builder_running`, GodMode closes the gap between "handoff sent"
+and "PR opened" with **read-only GitHub evidence** instead of a blind operator
+click (issue #38). A "Check for PR" control in the run control pane runs a
+discovery pass (`godmode:run:pr:discover`) that lists the operated project's open
+PRs and classifies candidates two ways: PRs whose title/body link the run's issue
+(`Closes #N` / `Fixes #N` / a bare `#N`, the strong signal), plus a conservative
+recent-unlinked fallback — open PRs created at/after the handoff send time — for
+when the builder forgot the link. Each candidate carries the evidence the
+transition records: PR number, URL, head branch, head commit SHA, author,
+created-at, and how it matched. Discovery issues only read-only `gh`/`git`
+commands scoped to the operated project root; every failure folds into a visible,
+non-fatal status (the run stays in `builder_running`).
+
+A single unambiguous issue-linked candidate is shown as the confirmed-pending
+pick; multiple candidates (or recent-unlinked-only guesses) require an explicit
+operator pick — discovery never auto-selects. Confirming a candidate
+(`godmode:run:pr:confirm`) dispatches `open_pr` through the existing `applyAction`
+guard with `branch`/`prNumber`/expected head commit pre-bound, names the PR and
+its match reason in the transition log, and immediately runs the #9
+commit-verification gate so the verification pane reflects the result at once. The
+old evidence-free "PR opened" click is no longer the primary path; a manual
+fallback remains, visibly labeled unverified and still requiring a PR number.
+
+When the builder pane's PTY exits during `builder_running`, GodMode surfaces a
+non-blocking hint ("builder session ended — check for the PR it opened") and runs
+one discovery pass (`godmode:run:pr:discovered`); PTY exit alone never transitions
+the run. A periodic poll is intentionally out of scope for v1 (on-demand +
+builder-exit only). See `docs/architecture/run-state-machine.md` and
+`docs/architecture/commit-verification.md`.
+
 ### Reviewer launch and PR comments
 
 From a `pr_opened` run, `godmode:run:reviewers:start` launches Reviewer A and B
@@ -261,6 +293,7 @@ V1 should feel like a terminal multiplexer with agent-specific panes:
 - [x] Agent adapter registry.
 - [x] Builder handoff: bind selected issue/manual task to a reviewed prompt and send to the builder.
 - [x] Commit verification: prove the expected builder commit is on the remote PR before trusting builder output (`docs/architecture/commit-verification.md`).
+- [x] Builder PR discovery: discover the builder's PR from read-only GitHub evidence while `builder_running` and bind it to the run via an evidence-bound `open_pr` (`docs/architecture/commit-verification.md`).
 - [ ] Claude builder run.
 - [x] Reviewer launch: launch Reviewer A/B from a verified PR, capture their output, and post role-signed PR comments (`docs/architecture/reviewer-launch.md`).
 - [x] Review synthesis: parse reviewer findings, compute the verified merge gate, and drive the first blocker-fix cycle (`docs/architecture/review-synthesis.md`).
