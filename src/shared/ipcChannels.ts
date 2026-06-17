@@ -31,6 +31,10 @@ export const GODMODE_IPC = {
   runSendFix: 'godmode:run:fix:send',
   runSetIsolation: 'godmode:run:isolation:set',
   runChanged: 'godmode:run:changed',
+  // Stale builder-session detection + recovery (issue #55).
+  runBuilderRecoveryGet: 'godmode:run:builder:recovery:get',
+  runBuilderRecoveryChanged: 'godmode:run:builder:recovery:changed',
+  runBuilderRelaunch: 'godmode:run:builder:relaunch',
   runLoopGet: 'godmode:run:loop:get',
   runLoopSetMode: 'godmode:run:loop:set-mode',
   runLoopChanged: 'godmode:run:loop:changed',

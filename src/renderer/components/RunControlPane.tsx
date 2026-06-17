@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type {
+  BuilderRecoveryState,
   LoopMode,
   LoopState,
   ManagedWorktree,
@@ -156,6 +157,12 @@ type RunControlPaneProps = {
   onDiscard: () => void;
   /** Whether a resume/discard request is in flight. */
   resumeBusy: boolean;
+  /** Stale builder-session state for a builder_running run (issue #55), or null. */
+  builderRecovery: BuilderRecoveryState | null;
+  /** Relaunch the builder and re-deliver the existing pointer-first handoff (#55). */
+  onRelaunchBuilder: () => void;
+  /** Whether a builder relaunch request is in flight. */
+  relaunchingBuilder: boolean;
 };
 
 function dispatchOptionsFor(action: RunAction): RunDispatchOptions | undefined {
@@ -308,12 +315,19 @@ export function RunControlPane({
   onResume,
   onDiscard,
   resumeBusy,
+  builderRecovery,
+  onRelaunchBuilder,
+  relaunchingBuilder,
 }: RunControlPaneProps) {
   const [manualPr, setManualPr] = useState('');
   const [manualBranch, setManualBranch] = useState('');
   const lastTransition = run && run.log.length > 0 ? run.log[run.log.length - 1] : null;
   const canToggleIsolation = run !== null && ISOLATION_TOGGLE_STATUSES.has(run.status);
   const showDiscovery = run !== null && run.status === 'builder_running';
+  // Stale builder-session recovery (issue #55): a builder_running run whose live
+  // builder PTY is gone. Visibly distinct from an actively-running builder, with
+  // explicit recovery actions instead of a silent generic `blocked`.
+  const builderStale = run !== null && run.status === 'builder_running' && (builderRecovery?.stale ?? false);
   // The evidence-bound discovery flow is the primary `open_pr` path (issue #38);
   // never render the old evidence-free "PR opened" button. A manual fallback below
   // still requires a PR number and is labeled unverified.
@@ -475,6 +489,37 @@ export function RunControlPane({
               <p className="run-error" role="alert">
                 {error}
               </p>
+            ) : null}
+
+            {builderStale ? (
+              <div className="run-builder-recovery warn" aria-label="Builder session recovery" role="status">
+                <span className="section-kicker">Builder session lost</span>
+                <p className="run-builder-recovery-message">
+                  {builderRecovery?.message ??
+                    'Builder session is no longer live. Relaunch it to re-deliver the handoff, or mark the agent failed.'}
+                </p>
+                <div className="run-actions">
+                  <button
+                    className="primary-action"
+                    onClick={onRelaunchBuilder}
+                    disabled={relaunchingBuilder}
+                    title="Relaunch the builder in the run worktree and re-deliver the existing pointer-first handoff"
+                  >
+                    {relaunchingBuilder ? 'Relaunching…' : 'Relaunch builder & re-send handoff'}
+                  </button>
+                  <button
+                    className="danger-action"
+                    onClick={() =>
+                      onDispatch('report_agent_failed', {
+                        reason: 'Builder session was lost (no live PTY); marked agent failed by operator.',
+                      })
+                    }
+                    title="Record the builder as failed with a reason and route the run to agent_failed"
+                  >
+                    Mark agent failed
+                  </button>
+                </div>
+              </div>
             ) : null}
 
             {showDiscovery ? (

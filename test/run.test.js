@@ -7,11 +7,13 @@ import { test } from 'node:test';
 import {
   DEFAULT_MAX_CYCLES,
   TRANSITION_TABLE,
+  adoptResumedRun,
   applyAction,
   clearRun,
   computeAvailableActions,
   createRun,
   dispatchRunAction,
+  evaluateBuilderRecovery,
   evaluateClearRun,
   getCurrentRun,
   recordCurrentRunPrompt,
@@ -629,5 +631,80 @@ test('reviewer controller wrappers act on the live run, null when none', () => {
   assert.equal(failed.reviewers[1].status, 'failed');
   assert.match(failed.reviewers[1].error, /command not found/);
   assert.equal(getCurrentRun().reviewers[1].status, 'failed');
+  clearRun();
+});
+
+// --- Stale builder-session detection + recovery (issue #55) ------------------
+
+/** A pure builder_running snapshot, advanced through the real transition table. */
+function builderRunningRun(overrides = {}) {
+  const created = createRun({ issueNumber: 55, issueTitle: 'Recover builder-running runs', now: NOW, id: 'run-55' });
+  const running = advance(created, ['select_issue', 'mark_ready', 'start_builder']);
+  return { ...running, ...overrides };
+}
+
+test('evaluateBuilderRecovery flags a builder_running run with no live builder PTY as stale', () => {
+  const run = builderRunningRun();
+  const recovery = evaluateBuilderRecovery(run, false);
+  assert.equal(recovery.stale, true);
+  assert.equal(recovery.hasBoundPr, false);
+  assert.match(recovery.message, /no longer live/i);
+  // No PR bound yet → the message points at a read-only discovery pass.
+  assert.match(recovery.message, /check for a PR|no PR is bound/i);
+});
+
+test('evaluateBuilderRecovery is not stale while the builder PTY is live', () => {
+  const run = builderRunningRun();
+  const recovery = evaluateBuilderRecovery(run, true);
+  assert.equal(recovery.stale, false);
+  assert.equal(recovery.message, undefined);
+});
+
+test('evaluateBuilderRecovery is not stale from any non-builder_running status', () => {
+  for (const status of ['issue_selected', 'ready_to_build', 'pr_opened', 'needs_human', 'closed']) {
+    const run = { ...builderRunningRun(), status };
+    assert.equal(evaluateBuilderRecovery(run, false).stale, false, `expected ${status} to not be stale`);
+  }
+});
+
+test('evaluateBuilderRecovery handles a null run without throwing', () => {
+  const recovery = evaluateBuilderRecovery(null, false);
+  assert.deepEqual(recovery, { stale: false, hasBoundPr: false });
+});
+
+test('evaluateBuilderRecovery tailors its message when a PR is already bound', () => {
+  const run = builderRunningRun({ prNumber: 123, branch: 'feat/x' });
+  const recovery = evaluateBuilderRecovery(run, false);
+  assert.equal(recovery.stale, true);
+  assert.equal(recovery.hasBoundPr, true);
+  assert.match(recovery.message, /#123/);
+});
+
+test('a resumed/persisted builder_running run has no live PTY and offers recovery actions', () => {
+  clearRun();
+  // Simulate a persisted builder_running run adopted on restart (issue #40 resume):
+  // the in-memory builder PTY cannot survive the restart, so liveness is false.
+  const persisted = builderRunningRun();
+  const restored = adoptResumedRun(persisted, NOW);
+  assert.equal(restored.status, 'builder_running');
+  // Recovery is visibly distinct from an actively-running builder.
+  assert.equal(evaluateBuilderRecovery(restored, false).stale, true);
+  // The explicit "mark agent failed" recovery is a legal action from builder_running.
+  assert.ok(
+    restored.availableActions.includes('report_agent_failed'),
+    'report_agent_failed must be available to recover a stale builder_running run',
+  );
+  // Marking the agent failed records an auditable transition with a reason.
+  const failed = dispatchRunAction('report_agent_failed', {
+    reason: 'Builder session was lost (no live PTY).',
+    now: NOW,
+  });
+  assert.equal(failed.ok, true);
+  assert.equal(failed.run.status, 'agent_failed');
+  const last = failed.run.log[failed.run.log.length - 1];
+  assert.equal(last.action, 'report_agent_failed');
+  assert.match(last.reason, /no live PTY/);
+  // A failed run is no longer stale (it left builder_running).
+  assert.equal(evaluateBuilderRecovery(failed.run, false).stale, false);
   clearRun();
 });

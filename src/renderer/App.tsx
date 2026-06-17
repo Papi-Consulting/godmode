@@ -3,6 +3,7 @@ import type {
   AppRepoState,
   AgentRole,
   BuilderHandoff,
+  BuilderRecoveryState,
   CommitVerification,
   LoopMode,
   LoopState,
@@ -88,6 +89,10 @@ export function App() {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Stale builder-session detection + recovery (issue #55). Main is authoritative:
+  // it derives staleness from the run + the live builder PTY and pushes changes.
+  const [builderRecovery, setBuilderRecovery] = useState<BuilderRecoveryState | null>(null);
+  const [relaunchingBuilder, setRelaunchingBuilder] = useState(false);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [discovery, setDiscovery] = useState<PrDiscoveryResult | null>(null);
@@ -243,6 +248,32 @@ export function App() {
     setDiscovery(null);
     setDiscoveryHint(null);
   }, []);
+
+  // Fetch the builder-recovery state (issue #55): whether a builder_running run has
+  // lost its live builder PTY. Main keeps it fresh via onBuilderRecoveryChanged.
+  const refreshBuilderRecovery = useCallback(async () => {
+    if (!window.godmode?.getBuilderRecovery) return;
+    const next = await window.godmode.getBuilderRecovery();
+    setBuilderRecovery(next ?? null);
+  }, []);
+
+  // Recover a stale builder: main relaunches the builder PTY in the run's worktree
+  // (cwd-gated) and re-delivers the existing pointer-first handoff, recording the
+  // re-send for audit. Explicit operator action — never auto-relaunched (issue #55).
+  const relaunchBuilder = useCallback(async () => {
+    if (!window.godmode?.relaunchBuilder) return;
+    setRelaunchingBuilder(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.relaunchBuilder();
+      if (seq !== runRequestSeq.current) return;
+      if (result.run) setRun(result.run);
+      setSendError(result.ok ? null : result.error);
+    } finally {
+      setRelaunchingBuilder(false);
+      void refreshBuilderRecovery();
+    }
+  }, [refreshBuilderRecovery]);
 
   // Refresh the operated project's GodMode-managed worktrees (for orphan cleanup).
   const refreshWorktrees = useCallback(async () => {
@@ -431,6 +462,7 @@ export function App() {
     void refreshRun();
     void refreshLoop();
     void refreshResume();
+    void refreshBuilderRecovery();
     // A run is scoped to its operated project; main discards it on project
     // change. Invalidate any in-flight fetch and clear the stale snapshot
     // immediately so the previous project's run never lingers, then re-fetch.
@@ -452,9 +484,13 @@ export function App() {
       // The resume offer is scoped to the operated project; clear and re-fetch so
       // the previous repo's persisted run never lingers (issue #40).
       setResumeState(null);
+      // Builder-recovery is scoped to the project's active run; clear and refetch
+      // so the previous repo's stale-session banner never lingers (issue #55).
+      setBuilderRecovery(null);
       void refreshRun();
       void refreshLoop();
       void refreshResume();
+      void refreshBuilderRecovery();
     });
     // Main pushes the run snapshot when async reviewer lifecycle changes (a
     // reviewer session exits, a marker comment posts/fails). Treat it as the
@@ -475,6 +511,9 @@ export function App() {
       // A run starting/clearing flips whether a resume offer is shown (it is
       // mutually exclusive with an active run); re-fetch so it stays in sync (#40).
       void refreshResume();
+      // The run's status drives builder-recovery staleness (e.g. leaving
+      // builder_running clears it); re-fetch so the banner stays in sync (#55).
+      void refreshBuilderRecovery();
     });
     // Main pushes the resume surface on project switch, save failure, and
     // resume/discard (issue #40). Treat it as authoritative.
@@ -493,14 +532,20 @@ export function App() {
     const offLoop = window.godmode?.onLoopChanged((next) => {
       setLoop(next ?? null);
     });
+    // Main pushes builder-recovery state when the builder PTY starts/dies or a
+    // builder_running run is resumed (issue #55). Treat it as authoritative.
+    const offBuilderRecovery = window.godmode?.onBuilderRecoveryChanged((next) => {
+      setBuilderRecovery(next ?? null);
+    });
     return () => {
       offProject?.();
       offRun?.();
       offLoop?.();
       offPrDiscovered?.();
       offResume?.();
+      offBuilderRecovery?.();
     };
-  }, [refreshRun, refreshLoop, refreshWorktrees, refreshResume]);
+  }, [refreshRun, refreshLoop, refreshWorktrees, refreshResume, refreshBuilderRecovery]);
 
   useEffect(() => {
     let active = true;
@@ -666,6 +711,7 @@ export function App() {
                 onCreateManualTask={createManualTask}
                 onSend={sendHandoff}
                 sendError={sendError}
+                builderRecovery={builderRecovery}
               />
               <RunControlPane
                 run={run}
@@ -688,6 +734,9 @@ export function App() {
                 onResume={resumeRun}
                 onDiscard={discardRun}
                 resumeBusy={resumeBusy}
+                builderRecovery={builderRecovery}
+                onRelaunchBuilder={relaunchBuilder}
+                relaunchingBuilder={relaunchingBuilder}
               />
               <VerificationPane
                 verification={verification}

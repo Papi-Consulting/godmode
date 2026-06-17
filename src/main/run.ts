@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  BuilderRecoveryState,
   ClearRunResult,
   CommitVerification,
   RunAction,
@@ -716,6 +717,37 @@ export function evaluateClearRun(
     }
   }
   return { ok: true, run: null };
+}
+
+/**
+ * Decide whether a `builder_running` run's live builder session has gone stale
+ * (issue #55). The builder PTY lives only in main's process memory, so a reset or
+ * an app restart (resume, issue #40) can leave a run persisted as `builder_running`
+ * while no builder process is actually running. Pure — the caller supplies the
+ * live-session flag (`hasPtySession('builder')`) — so it is unit-testable without a
+ * PTY and the renderer renders an explicit recovery path instead of a generic
+ * `blocked` label.
+ *
+ * `stale` is true exactly when the run is `builder_running` and the builder PTY is
+ * gone; any other status, or a live builder, is not stale. The `message` names the
+ * recovery options (relaunch + re-deliver, or mark the agent failed) and adapts to
+ * whether a PR is already bound, since a builder that died before opening a PR is
+ * still worth a read-only discovery pass.
+ */
+export function evaluateBuilderRecovery(
+  run: RunSnapshot | null,
+  hasLiveBuilderSession: boolean,
+): BuilderRecoveryState {
+  const hasBoundPr = run?.prNumber !== undefined;
+  if (!run || run.status !== 'builder_running' || hasLiveBuilderSession) {
+    return { stale: false, hasBoundPr };
+  }
+  const message = hasBoundPr
+    ? `Builder session is no longer live. PR #${run.prNumber} is bound — verify it, relaunch the builder ` +
+      'to re-deliver the handoff, or mark the agent failed.'
+    : 'Builder session is no longer live, and no PR is bound yet. Relaunch the builder to re-deliver the ' +
+      'handoff, check for a PR it may have opened, or mark the agent failed.';
+  return { stale: true, hasBoundPr, message };
 }
 
 /**

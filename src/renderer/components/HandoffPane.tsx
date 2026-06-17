@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { BuilderHandoff, RunSnapshot } from '../../shared/types.js';
+import type { BuilderHandoff, BuilderRecoveryState, RunSnapshot } from '../../shared/types.js';
 
 type HandoffPaneProps = {
   run: RunSnapshot | null;
@@ -11,6 +11,12 @@ type HandoffPaneProps = {
   onSend: () => void;
   /** Most recent send rejection, surfaced inline. */
   sendError: string | null;
+  /**
+   * Stale builder-session state for a builder_running run (issue #55), or null. A
+   * sent-but-stale handoff is labeled distinctly (and points at Run Control for
+   * recovery) instead of the old generic `blocked`.
+   */
+  builderRecovery: BuilderRecoveryState | null;
 };
 
 /**
@@ -22,7 +28,14 @@ type HandoffPaneProps = {
  * unresolved variables. When no source is bound the preview is clearly labeled
  * mock/demo and a manual task can be entered instead.
  */
-export function HandoffPane({ run, selectionLocked, onCreateManualTask, onSend, sendError }: HandoffPaneProps) {
+export function HandoffPane({
+  run,
+  selectionLocked,
+  onCreateManualTask,
+  onSend,
+  sendError,
+  builderRecovery,
+}: HandoffPaneProps) {
   const [handoff, setHandoff] = useState<BuilderHandoff | null>(null);
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
@@ -66,18 +79,39 @@ export function HandoffPane({ run, selectionLocked, onCreateManualTask, onSend, 
   const inSendableState = run !== null && ['issue_selected', 'needs_spec', 'ready_to_build'].includes(run.status);
   const canSend = Boolean(handoff?.canSend) && inSendableState;
   const lastPrompt = run && run.prompts.length > 0 ? run.prompts[run.prompts.length - 1] : null;
+  // The handoff was already sent once the run is builder_running. Rather than the
+  // old generic `blocked`, say so — and when the live builder PTY is gone (issue
+  // #55), point the operator at Run Control's recovery actions.
+  const builderRunning = run !== null && run.status === 'builder_running';
+  const builderStale = builderRunning && (builderRecovery?.stale ?? false);
+  // Chip label/tone: a stale builder is a warning to act on; an active builder is
+  // neutral-informational; otherwise fall back to the bound/blocked send gate.
+  const chipTone = !handoff
+    ? ''
+    : handoff.isMock || builderStale
+      ? 'warn'
+      : builderRunning
+        ? ''
+        : canSend
+          ? 'success'
+          : 'warn';
+  const chipLabel = !handoff
+    ? 'loading…'
+    : handoff.isMock
+      ? 'mock · no source bound'
+      : builderStale
+        ? 'builder session lost · recover in Run Control'
+        : builderRunning
+          ? 'builder running'
+          : canSend
+            ? 'bound · review & send'
+            : 'blocked';
 
   return (
     <section className="stack-section handoff-pane" aria-label="Builder handoff">
       <header>
         <span className="section-kicker">Builder Handoff</span>
-        {handoff ? (
-          <span className={`header-chip ${handoff.isMock ? 'warn' : canSend ? 'success' : 'warn'}`}>
-            {handoff.isMock ? 'mock · no source bound' : canSend ? 'bound · review & send' : 'blocked'}
-          </span>
-        ) : (
-          <span className="header-chip">loading…</span>
-        )}
+        <span className={`header-chip ${chipTone}`}>{chipLabel}</span>
       </header>
 
       {handoff ? (
@@ -122,7 +156,12 @@ export function HandoffPane({ run, selectionLocked, onCreateManualTask, onSend, 
             </div>
           ) : null}
 
-          {!canSend && handoff.blockedReason ? (
+          {builderStale ? (
+            <p className="handoff-blocked warn" role="status">
+              {builderRecovery?.message ?? 'Builder session is no longer live.'} Use Run Control to relaunch the
+              builder and re-deliver this handoff, or mark the agent failed.
+            </p>
+          ) : !canSend && !builderRunning && handoff.blockedReason ? (
             <p className="handoff-blocked" role="status">
               {handoff.blockedReason}
             </p>
