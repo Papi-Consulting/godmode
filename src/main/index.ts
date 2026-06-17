@@ -618,8 +618,14 @@ function handleGetBuilderRecovery(): BuilderRecoveryState {
  * `builder_running` (re-delivery records that the prompt was sent, never that the
  * task succeeded). The alternative recovery — marking the agent failed — flows
  * through the existing `report_agent_failed` interrupt edge.
+ *
+ * Recovery acts ONLY on a genuinely lost session (the live-PTY guard below), and the
+ * relaunched PTY shares the same renderer-ownership cleanup and a `pty:started`
+ * signal as a normal pane start, so the builder pane reflects the recovered live
+ * session instead of a process state that is not true (reviewer-a A-1 / reviewer-b
+ * B-2). See docs/architecture/builder-recovery.md.
  */
-async function handleRelaunchBuilder(): Promise<HandoffSendResult> {
+async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promise<HandoffSendResult> {
   let run = getCurrentRun();
   if (!run) {
     return { ok: false, code: 'no_run', error: 'There is no active run to relaunch the builder for.', run: null };
@@ -629,6 +635,19 @@ async function handleRelaunchBuilder(): Promise<HandoffSendResult> {
       ok: false,
       code: 'invalid_state',
       error: `Builder relaunch is only available while the run is builder-running (current: ${run.status}).`,
+      run,
+    };
+  }
+  // Defense-in-depth, matching the UI (the recovery banner only renders when the
+  // run is stale): recovery is for a LOST builder, never a live one (reviewer-b
+  // B-1 / reviewer-a A-1). Refuse rather than kill+replace a running builder — that
+  // would be the opposite of #55's "don't pretend a process state that isn't true".
+  // Restarting a live builder stays the builder pane's own job.
+  if (hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The builder session is still live; relaunch only recovers a lost session. Use the builder pane to restart it.',
       run,
     };
   }
@@ -663,9 +682,16 @@ async function handleRelaunchBuilder(): Promise<HandoffSendResult> {
     worktreePath = ensured.worktree.path;
   }
 
-  // Launch a fresh builder PTY (openPtySession replaces any stale one) in the gated
-  // cwd, streaming to the builder pane just like a renderer-driven start. A builder
-  // exit still surfaces the #38 PR-discovery hint and refreshes the recovery banner.
+  // Take renderer ownership of the relaunched session exactly like handleStartPty:
+  // a window destroy or navigation must stop the recovered builder, never orphan it.
+  const stopOwnedSession = () => stopPtySession('builder');
+  event.sender.once('destroyed', stopOwnedSession);
+  event.sender.once('did-start-navigation', stopOwnedSession);
+
+  // Launch a fresh builder PTY (the prior session is already gone — guarded above)
+  // in the gated cwd, streaming to the builder pane just like a renderer-driven
+  // start. A builder exit still surfaces the #38 PR-discovery hint and refreshes the
+  // recovery banner.
   const result = openPtySession({
     paneId: 'builder',
     projectRoot,
@@ -682,6 +708,9 @@ async function handleRelaunchBuilder(): Promise<HandoffSendResult> {
   if (!result.ok) {
     return { ok: false, code: 'no_builder_session', error: `Builder relaunch failed: ${result.error}`, run };
   }
+  // Tell the builder pane a session is now live so it reflects running/Stop-enabled
+  // state — this relaunch happened in main, not via the pane's own start() click.
+  emitToRenderer(GODMODE_IPC.ptyStarted, { paneId: 'builder' });
 
   // Re-deliver the pointer-first prompt into the fresh PTY and record the re-send
   // for audit (the trailing carriage return commits the line, as on first send).
@@ -2056,7 +2085,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runDispatch, handleDispatchRun);
   ipcMain.handle(GODMODE_IPC.runClear, handleClearRun);
   ipcMain.handle(GODMODE_IPC.runBuilderRecoveryGet, handleGetBuilderRecovery);
-  ipcMain.handle(GODMODE_IPC.runBuilderRelaunch, () => handleRelaunchBuilder());
+  ipcMain.handle(GODMODE_IPC.runBuilderRelaunch, (event) => handleRelaunchBuilder(event));
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);

@@ -61,6 +61,16 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
         term.writeln(`\r\n[process exited: ${event.exit.exitCode}]`);
       }
     });
+    // Main may start a session on this pane's behalf (e.g. the builder recovery
+    // relaunch, issue #55). Reflect it as running — the pane did not click Start, so
+    // without this its controls would stay idle while a live process exists, and
+    // unmount cleanup would not stop it.
+    const removeStartedListener = window.godmode?.onPtyStarted((event) => {
+      if (event.paneId === id) {
+        runningRef.current = true;
+        setStatus('running');
+      }
+    });
 
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
@@ -77,6 +87,7 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
       }
       removeDataListener?.();
       removeExitListener?.();
+      removeStartedListener?.();
       resizeObserver.disconnect();
       term.dispose();
       terminalRef.current = null;

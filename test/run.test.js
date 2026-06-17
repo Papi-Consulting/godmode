@@ -708,3 +708,12 @@ test('a resumed/persisted builder_running run has no live PTY and offers recover
   assert.equal(evaluateBuilderRecovery(failed.run, false).stale, false);
   clearRun();
 });
+
+test('builder relaunch guard contract: a live builder is never stale, so relaunch must refuse it (reviewer-b B-1)', () => {
+  // handleRelaunchBuilder gates on this helper: recovery acts only on a genuinely
+  // LOST builder. With a live PTY the run is not stale, so the relaunch handler
+  // refuses rather than killing and replacing a running builder.
+  const run = builderRunningRun();
+  assert.equal(evaluateBuilderRecovery(run, true).stale, false, 'a live builder must not be treated as recoverable');
+  assert.equal(evaluateBuilderRecovery(run, false).stale, true, 'only a lost builder is recoverable');
+});

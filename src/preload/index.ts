@@ -153,6 +153,12 @@ const api = {
     ipcRenderer.on(GODMODE_IPC.ptyExit, listener);
     return () => ipcRenderer.off(GODMODE_IPC.ptyExit, listener);
   },
+  // Main started a PTY on the pane's behalf (e.g. builder recovery relaunch, #55).
+  onPtyStarted: (callback: (event: { paneId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { paneId: string }) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.ptyStarted, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.ptyStarted, listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('godmode', api);

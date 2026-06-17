@@ -51,6 +51,9 @@ export const GODMODE_IPC = {
   ptyStop: 'godmode:pty:stop',
   ptyData: 'godmode:pty:data',
   ptyExit: 'godmode:pty:exit',
+  // Pushed when main starts a PTY on the pane's behalf (e.g. builder recovery
+  // relaunch, issue #55) so the pane reflects the live session it did not start.
+  ptyStarted: 'godmode:pty:started',
 } as const;
 
 export type GodmodeIpcChannel = (typeof GODMODE_IPC)[keyof typeof GODMODE_IPC];
