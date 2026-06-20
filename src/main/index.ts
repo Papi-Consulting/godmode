@@ -96,6 +96,7 @@ import {
 import {
   canPostReviewerMarker,
   canSynthesizeReviews,
+  classifyGenericPaneLaunch,
   composeReviewerLaunch,
   isLoopReviewSynthesisPreempted,
   isLoopReviewerLaunchPreempted,
@@ -103,6 +104,7 @@ import {
   isReviewerSessionStale,
   resolveReviewerExit,
   reviewerCommentBody,
+  reviewerLaunchArgs,
   reviewerLaunchTransition,
 } from './reviewer.js';
 import type {
@@ -1515,7 +1517,7 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
       paneId: reviewer.paneId,
       projectRoot,
       command: resolved.spec.command,
-      extraArgs: oneshot ? [reviewer.prompt] : undefined,
+      extraArgs: reviewerLaunchArgs(resolved.spec.mode, reviewer.prompt),
       onData: (data) => {
         if (!appendArtifact(absArtifact, data) && !captureFailed) {
           captureFailed = true;
@@ -1993,6 +1995,16 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
   const launch = resolveRoleLaunch(payload.paneId);
   if (!launch.ok) {
     return { ok: false, paneId: payload.paneId, error: launch.error };
+  }
+
+  // Generic pane Start/Restart never spawns a one-shot reviewer (issue #58): such a
+  // reviewer needs its full review prompt at process start, which only the run-bound
+  // reviewer launch (handleStartReviewers) provides. Refuse before spawn with an
+  // actionable message — never let openPtySession launch a one-shot reviewer with no
+  // prompt (e.g. an empty `codex exec`). Keys off role + mode, not a vendor branch.
+  const genericLaunch = classifyGenericPaneLaunch(payload.paneId, launch.spec.mode);
+  if (!genericLaunch.allowed) {
+    return { ok: false, paneId: payload.paneId, error: genericLaunch.reason };
   }
 
   const projectRoot = getSelectedProjectRoot();

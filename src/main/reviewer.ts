@@ -1,4 +1,6 @@
 import type {
+  AgentMode,
+  AgentRole,
   ReviewerHandoff,
   ReviewerLaunchPlan,
   ReviewerSessionStatus,
@@ -49,6 +51,67 @@ export type ComposeReviewerOptions = {
 
 function deliveryFor(mode: string): ReviewerHandoff['delivery'] {
   return mode === 'oneshot' ? 'oneshot' : 'interactive';
+}
+
+/** The reviewer panes, by their generic role ids (not vendor-specific). */
+export function isReviewerPane(paneId: AgentRole): boolean {
+  return paneId === 'reviewer_a' || paneId === 'reviewer_b';
+}
+
+/**
+ * The actionable message shown in a reviewer pane when its generic Start/Restart
+ * control is refused. It points the operator at the run-bound launch path rather
+ * than failing as a generic app error.
+ */
+export const ONESHOT_REVIEWER_GENERIC_START_MESSAGE =
+  'This reviewer runs one-shot and needs its full review prompt at process start. ' +
+  'Launch reviewers from a verified PR via the run-bound "Start reviewers" action — ' +
+  'the generic Start/Restart control would spawn the reviewer command with no prompt ' +
+  '(e.g. an empty `codex exec` that exits immediately) and produce no review.';
+
+export type GenericPaneLaunchDecision =
+  | { allowed: true }
+  | { allowed: false; reason: string };
+
+/**
+ * Whether the generic pane Start/Restart control (issue #58) may spawn a session
+ * for this pane without a run-bound prompt. A **one-shot reviewer** needs its full
+ * review prompt at process start — the run-bound reviewer launch
+ * (`handleStartReviewers`) delivers it as a launch argument. Starting such a pane
+ * generically would spawn the configured reviewer command with no prompt (for the
+ * default `codex exec` reviewer, it exits immediately with a no-prompt error),
+ * making the pane look actionable while producing no review. That path is refused
+ * before spawn with an actionable message instead.
+ *
+ * Interactive reviewers (and every non-reviewer pane) keep their generic launch —
+ * an interactive reviewer is a normal live shell the operator may start directly.
+ *
+ * Keys off role + mode only (no vendor branch): the gate applies to any one-shot
+ * reviewer-capable agent, not just the default Codex reviewer.
+ */
+export function classifyGenericPaneLaunch(
+  paneId: AgentRole,
+  mode: AgentMode,
+): GenericPaneLaunchDecision {
+  if (isReviewerPane(paneId) && mode === 'oneshot') {
+    return { allowed: false, reason: ONESHOT_REVIEWER_GENERIC_START_MESSAGE };
+  }
+  return { allowed: true };
+}
+
+/**
+ * The launch arguments a run-bound reviewer session receives at process start
+ * (issue #10/#58). A one-shot reviewer reads its prompt and exits, so the
+ * pointer-first review prompt MUST be present at spawn (passed as argv) rather
+ * than written into the PTY afterward, which could no-op against an already-exited
+ * process and lose the prompt. Interactive reviewers stay live and receive the
+ * prompt over the PTY instead, so they take no launch argument here.
+ *
+ * Centralizing this keeps the "one-shot reviewer always launches with its prompt"
+ * invariant in one tested place, away from Electron.
+ */
+export function reviewerLaunchArgs(mode: AgentMode, prompt: string): string[] | undefined {
+  return mode === 'oneshot' ? [prompt] : undefined;
 }
 
 /**

@@ -89,11 +89,28 @@ command with the operated-project root as cwd and the sanitized env.
 
 **Prompt delivery is mode-aware** so a one-shot reviewer never loses its prompt: a
 `oneshot` agent reads its prompt and exits, so the prompt is passed as a final
-launch argument (`openPtySession`'s `extraArgs`, one argv element, no shell) and
-is present when the process starts; an interactive agent stays live, so the prompt
-is written into the PTY after spawn (`writeToPtySession`). Writing into a PTY whose
-one-shot process had already exited would silently no-op and drop the prompt — the
-argv path avoids that race.
+launch argument (`openPtySession`'s `extraArgs`, one argv element, no shell, derived
+by the pure `reviewerLaunchArgs(mode, prompt)` helper) and is present when the
+process starts; an interactive agent stays live, so the prompt is written into the
+PTY after spawn (`writeToPtySession`). Writing into a PTY whose one-shot process had
+already exited would silently no-op and drop the prompt — the argv path avoids that
+race.
+
+**The generic pane Start/Restart control never launches a one-shot reviewer
+(issue #58).** The run-bound path above is the *only* path that has a review prompt
+to deliver at process start; the generic `godmode:pty:start` (`handleStartPty`) has
+none. Starting a one-shot reviewer there would spawn its command with no prompt — for
+the default `codex exec` reviewer, an empty invocation that exits immediately with a
+no-prompt error — making the pane look actionable while producing no review. So
+`handleStartPty` consults the pure `classifyGenericPaneLaunch(paneId, mode)` helper
+and, for a one-shot reviewer pane, refuses **before spawn** with an actionable
+message (`ONESHOT_REVIEWER_GENERIC_START_MESSAGE`) telling the operator to launch
+reviewers from a verified PR via the run-bound "Start reviewers" action. The refusal
+returns the standard `{ ok: false, error }` so the reviewer pane surfaces it inline
+(its `[launch error: …]` line), not as a generic app failure. The gate keys off
+role + mode only (no vendor branch): an **interactive** reviewer — and every
+non-reviewer pane — keeps its generic interactive-shell launch, preserving
+intentional interactive reviewer support.
 
 The one-shot command itself must be the agent's **non-interactive** invocation, or
 it never exits and the reviewer sits in `running` forever. The default Codex
