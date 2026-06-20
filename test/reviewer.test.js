@@ -4,17 +4,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  ONESHOT_REVIEWER_GENERIC_START_MESSAGE,
   canPostReviewerMarker,
   canSynthesizeReviews,
+  classifyGenericPaneLaunch,
   composeReviewerLaunch,
   isLoopReviewSynthesisPreempted,
   isLoopReviewerLaunchPreempted,
   isReviewSynthesisPreempted,
   isReviewerLaunchPreempted,
+  isReviewerPane,
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
   reviewerCommentBody,
+  reviewerLaunchArgs,
   reviewerLaunchTransition,
 } from '../dist/main/reviewer.js';
 import { DEFAULT_CONFIG } from '../dist/main/config.js';
@@ -93,6 +97,55 @@ test('default reviewers are one-shot and launch the non-interactive codex exec p
     assert.equal(reviewer.delivery, 'oneshot');
     assert.match(reviewer.commandLine, /codex exec/);
   }
+});
+
+test('issue #58: a one-shot reviewer pane cannot be generically started (no run-bound prompt)', () => {
+  // The generic pane Start/Restart path provides no prompt, so spawning a one-shot
+  // reviewer there would launch an empty `codex exec` that exits with a no-prompt
+  // error. Both reviewer panes must be refused before spawn, with an actionable
+  // message pointing at the run-bound "Start reviewers" launch.
+  for (const pane of ['reviewer_a', 'reviewer_b']) {
+    const decision = classifyGenericPaneLaunch(pane, 'oneshot');
+    assert.equal(decision.allowed, false, `${pane} one-shot generic start must be refused`);
+    assert.equal(decision.reason, ONESHOT_REVIEWER_GENERIC_START_MESSAGE);
+    assert.match(decision.reason, /Start reviewers/);
+    assert.match(decision.reason, /verified PR/i);
+  }
+});
+
+test('issue #58: interactive reviewers and non-reviewer panes keep their generic launch', () => {
+  // An interactive reviewer is a normal live shell the operator may start directly;
+  // builder/head panes are never reviewer one-shot launches. Keys off role + mode,
+  // not a vendor branch — `oneshot_or_interactive` reviewers deliver over the PTY.
+  assert.deepEqual(classifyGenericPaneLaunch('reviewer_a', 'interactive'), { allowed: true });
+  assert.deepEqual(classifyGenericPaneLaunch('reviewer_b', 'oneshot_or_interactive'), { allowed: true });
+  assert.deepEqual(classifyGenericPaneLaunch('builder', 'oneshot'), { allowed: true });
+  assert.deepEqual(classifyGenericPaneLaunch('head', 'interactive'), { allowed: true });
+  assert.equal(isReviewerPane('reviewer_a'), true);
+  assert.equal(isReviewerPane('reviewer_b'), true);
+  assert.equal(isReviewerPane('builder'), false);
+  assert.equal(isReviewerPane('head'), false);
+});
+
+test('issue #58: the run-bound reviewer launch passes a one-shot reviewer its full prompt at process start', () => {
+  // The prompt-bearing workflow must keep delivering the rendered prompt as a launch
+  // argument for one-shot reviewers (present at spawn, so it is never lost against an
+  // already-exited process), while interactive reviewers take no launch arg and
+  // receive the prompt over the PTY instead.
+  const plan = composeReviewerLaunch(DEFAULT_CONFIG, issueRun(), {
+    projectName: 'godmode',
+    pr: PR,
+    verified: true,
+  });
+  assert.ok(plan.reviewers.length > 0);
+  for (const reviewer of plan.reviewers) {
+    const args = reviewerLaunchArgs('oneshot', reviewer.prompt);
+    assert.deepEqual(args, [reviewer.prompt]);
+    assert.ok(args[0].length > 0, 'one-shot reviewer must launch with a non-empty prompt');
+    assert.match(args[0], new RegExp(`PR #${PR.number}`));
+  }
+  assert.equal(reviewerLaunchArgs('interactive', 'hello'), undefined);
+  assert.equal(reviewerLaunchArgs('oneshot_or_interactive', 'hello'), undefined);
 });
 
 test('an unverified PR blocks launch even when the PR is bound', () => {
