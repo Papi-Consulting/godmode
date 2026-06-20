@@ -19,6 +19,7 @@ import type {
   PrDiscoveryResult,
   ProjectConfigState,
   ProjectState,
+  PtyWriteResult,
   ReviewSynthesisResult,
   ReviewerCommentResult,
   RunAction,
@@ -141,6 +142,11 @@ const api = {
   startPty: (input: { paneId: string }) =>
     ipcRenderer.invoke(GODMODE_IPC.ptyStart, input) as Promise<PtyStartResult | undefined>,
   writePty: (input: { paneId: string; data: string }) => ipcRenderer.send(GODMODE_IPC.ptyWrite, input),
+  // Operator role-message delivery with a typed result (issue #57). Separate from
+  // `writePty` (raw xterm typing stays fire-and-forget) so the renderer can clear
+  // the field only on a confirmed write and surface a reason otherwise.
+  sendPty: (input: { paneId: string; data: string }) =>
+    ipcRenderer.invoke(GODMODE_IPC.ptySend, input) as Promise<PtyWriteResult>,
   resizePty: (input: { paneId: string; cols: number; rows: number }) => ipcRenderer.send(GODMODE_IPC.ptyResize, input),
   stopPty: (input: { paneId: string }) => ipcRenderer.send(GODMODE_IPC.ptyStop, input),
   onPtyData: (callback: (event: PtyDataEvent) => void) => {

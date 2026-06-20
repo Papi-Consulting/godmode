@@ -9,7 +9,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { resolveRoleLaunch } from '../dist/main/agents.js';
-import { resolveExecutable } from '../dist/main/pty.js';
+import {
+  openPtySession,
+  resolveExecutable,
+  stopPtySession,
+  writeToPtySessionResult,
+} from '../dist/main/pty.js';
 import { selectProject } from '../dist/main/project.js';
 
 function makeProject(files = {}) {
@@ -91,6 +96,47 @@ test('resolveExecutable returns null for a missing command', () => {
     PATH: process.env.PATH ?? '',
   });
   assert.equal(resolved, null);
+});
+
+// --- Typed PTY delivery result (issue #57) -------------------------------------
+// Role message / global command controls must deliver to a live PTY with visible
+// evidence, or report why nothing was written — never a silent no-op.
+
+test('writeToPtySessionResult reports no_live_session when the pane has no PTY', () => {
+  // Regression guard: before the fix, writing to a dead pane silently returned.
+  const result = writeToPtySessionResult('reviewer_a', 'review the latest commit\r');
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'no_live_session');
+  assert.equal(result.paneId, 'reviewer_a');
+  assert.match(result.error, /No live reviewer_a session/);
+});
+
+test('writeToPtySessionResult reports unknown_pane for an unrecognized pane id', () => {
+  const result = writeToPtySessionResult('not_a_pane', 'hello\r');
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'unknown_pane');
+});
+
+test('writeToPtySessionResult confirms a write to a live session', () => {
+  // `cat` reads stdin and stays alive, so the pane has a live PTY to deliver to.
+  const root = makeProject();
+  const started = openPtySession({
+    paneId: 'builder',
+    projectRoot: root,
+    command: 'cat',
+    onData: () => {},
+    onExit: () => {},
+  });
+  assert.equal(started.ok, true, started.ok ? '' : started.error);
+  try {
+    const data = 'run the tests\r';
+    const result = writeToPtySessionResult('builder', data);
+    assert.equal(result.ok, true);
+    assert.equal(result.paneId, 'builder');
+    assert.equal(result.bytes, Buffer.byteLength(data));
+  } finally {
+    stopPtySession('builder');
+  }
 });
 
 test('resolveExecutable resolves a project-relative executable path', () => {

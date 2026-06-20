@@ -633,9 +633,18 @@ export function App() {
                 </article>
               ))}
             </div>
+            {/* Harness team chat is not implemented (a persistent transcript/chat
+                server is out of scope for #57). Keep the control visibly disabled
+                rather than accepting text it cannot dispatch. To message a live
+                agent today, use a role pane's "Message <role>" control. */}
             <div className="chat-input-row">
-              <input aria-label="Chat message" placeholder="Message #godmode..." />
-              <button>Send</button>
+              <input
+                aria-label="Chat message"
+                placeholder="Team chat not yet wired — use a role pane's Message control"
+                disabled
+                title="Harness team chat is not implemented yet. Use a role pane's Message control to reach a live agent."
+              />
+              <button disabled>Send</button>
             </div>
             <div className="chat-controls" aria-label="Local run controls">
               <div>
@@ -764,9 +773,20 @@ export function App() {
           </section>
         </section>
 
+        {/* Global command routing (product spec 6.5) is not implemented: there is
+            no designed rule mapping free text to a target role's live PTY. Rather
+            than leave an enabled input that silently no-ops (issue #57), the bar is
+            visibly disabled. Operators drive live agents through each role pane's
+            "Message <role>" control, which delivers with a typed result today. */}
         <footer className="command-bar">
           <span>Global command</span>
-          <input placeholder="Hermes: spec issue #12, Claude: explain current plan, Codex A: review latest commit..." />
+          <input
+            aria-label="Global command"
+            placeholder="Global command routing not yet wired — use a role pane's Message control"
+            disabled
+            title="Global command routing is not implemented yet. Use a role pane's Message control to reach a live agent."
+          />
+          <span className="command-bar-note">not yet wired</span>
         </footer>
       </main>
     </div>

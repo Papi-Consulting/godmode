@@ -47,6 +47,10 @@ export const GODMODE_IPC = {
   worktreeCleanup: 'godmode:worktree:cleanup',
   ptyStart: 'godmode:pty:start',
   ptyWrite: 'godmode:pty:write',
+  // Operator role-message delivery with a typed result (issue #57). Distinct from
+  // the fire-and-forget `ptyWrite` (raw xterm typing): this is an `invoke` so the
+  // renderer learns whether the bytes reached a live PTY or no-op'd.
+  ptySend: 'godmode:pty:send',
   ptyResize: 'godmode:pty:resize',
   ptyStop: 'godmode:pty:stop',
   ptyData: 'godmode:pty:data',

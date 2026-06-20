@@ -899,6 +899,14 @@ p {
   color: var(--brand-bright);
 }
 
+/* Inline role-message delivery failure (issue #57): no live session / write failed. */
+.agent-message-error {
+  margin: 0;
+  padding: 2px 9px 6px;
+  font-size: 0.66rem;
+  color: #ff9d9d;
+}
+
 /*
  * The pane is a fixed header + scrolling body + fixed footer. The body owns the
  * only scroll region so the footer (Refresh / merge gate) can never overlap the
@@ -1429,12 +1437,20 @@ p {
 
 .command-bar {
   display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
+  grid-template-columns: 118px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 4px 9px;
   border-top: 1px solid var(--line);
   background: #050818;
+}
+
+/* Honest "not implemented yet" marker for the disabled global command bar (#57). */
+.command-bar-note {
+  color: var(--text-soft);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  opacity: 0.8;
 }
 
 .command-bar span {
