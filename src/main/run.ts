@@ -674,10 +674,24 @@ export function setRunWorktree(run: RunSnapshot, worktree: RunWorktree | null, n
   return { ...run, worktree, branch: worktree.branch, updatedAt: at };
 }
 
-/** Set/clear the current run's worktree (controller wrapper). Null when no run. */
-export function setCurrentRunWorktree(worktree: RunWorktree | null, now?: string): RunSnapshot | null {
+/**
+ * Set/clear the current run's worktree (controller wrapper). Null when no run.
+ *
+ * Identity guard (reviewer-a A-2): worktree preparation awaits the event loop, so by
+ * the time the caller records the prepared worktree the operator may have cancelled,
+ * replaced, or switched away from the run it was prepared for. `currentRun` is a global
+ * pointer, so an unconditional write would attach THIS run's worktree/branch metadata to
+ * whatever unrelated run is now current and persist/emit that corrupted snapshot. When
+ * `expectedRunId` is supplied this refuses (returns null, mutates nothing) unless the
+ * current run is still that exact run.
+ */
+export function setCurrentRunWorktree(
+  worktree: RunWorktree | null,
+  opts: { expectedRunId?: string; now?: string } = {},
+): RunSnapshot | null {
   if (!currentRun) return null;
-  setCurrentRun(setRunWorktree(currentRun, worktree, now));
+  if (opts.expectedRunId !== undefined && currentRun.id !== opts.expectedRunId) return null;
+  setCurrentRun(setRunWorktree(currentRun, worktree, opts.now));
   return currentRun;
 }
 

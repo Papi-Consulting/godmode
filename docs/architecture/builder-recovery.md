@@ -68,6 +68,18 @@ re-delivers the *existing* pointer-first handoff prompt. Its contract:
   launched **inside** it before any prompt is written, so re-delivery can never land
   in the shared checkout. (`openPtySession` independently enforces the cwd
   allowlist as defense-in-depth.)
+- **Worktree *recording* is identity-aware, not just the spawn.** `ensureRunWorktree`
+  awaits `createWorktree`, then records the prepared worktree on the current run via
+  `setCurrentRunWorktree`, which writes to the global current-run pointer. If the
+  operator cancels/replaces the run or switches projects during that await, recording
+  would attach this run's worktree/branch to an unrelated run (or another project's
+  tree) and persist/emit that corrupted snapshot — *before* the handler's own
+  pre-spawn guard runs. So `ensureRunWorktree` re-checks the run id and selected
+  project root after the await and refuses to record on drift, and
+  `setCurrentRunWorktree` takes an `expectedRunId` so the write itself is refused
+  unless the same run is still current. Recovery (and any other worktree consumer)
+  thus never mutates run/worktree ownership across the async gate; a drifted relaunch
+  records nothing and the caller refuses with `worktree_failed`/`invalid_state`.
 - **Same sendability gate as the original send.** The recomposed handoff must be
   `canSend` (a bound GitHub issue with no unresolved variables); a manual task stays
   blocked exactly as on first send.

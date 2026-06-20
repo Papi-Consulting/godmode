@@ -383,6 +383,12 @@ async function ensureRunWorktree(
 > {
   if (run.isolation !== 'worktree') return { mode: 'shared' };
 
+  // Snapshot the run identity and project root taken BEFORE the awaits below
+  // (`isGitRepo`, `createWorktree`). Both yield the event loop, so by the time we
+  // record the prepared worktree the operator may have cancelled/replaced the run or
+  // switched projects (reviewer-a A-2). We must not attach this run's worktree to a
+  // different run or a different project's tree.
+  const expectedRunId = run.id;
   const projectRoot = getSelectedProjectRoot();
   if (!(await isGitRepo(projectRoot))) {
     return {
@@ -407,14 +413,42 @@ async function ensureRunWorktree(
     return { mode: 'worktree', ok: false, error: created.error };
   }
 
+  // Identity-aware recording (reviewer-a A-2): `createWorktree` awaited, so the global
+  // current run / selected project may have moved out from under us during preparation.
+  // `setCurrentRunWorktree` writes to whatever run is current, so recording now could
+  // attach THIS run's worktree/branch to an unrelated run (or a different project) and
+  // persist/emit that corrupted snapshot — even before a caller's own post-await guard
+  // runs. Refuse to record if the world changed; the prepared worktree is left on disk
+  // and is harmlessly re-validated/reused on the next attempt. The caller treats this as
+  // a worktree failure and never spawns.
+  if (getCurrentRun()?.id !== expectedRunId || getSelectedProjectRoot() !== projectRoot) {
+    return {
+      mode: 'worktree',
+      ok: false,
+      error:
+        'The active run or project changed while preparing the worktree; recording was skipped to avoid attaching it to a different run.',
+    };
+  }
+
   const worktree: RunWorktree = {
     path: created.dir,
     branch: created.branch,
     // Preserve the original creation timestamp across validated reuse.
     createdAt: run.worktree?.createdAt ?? new Date().toISOString(),
   };
-  const updated = setCurrentRunWorktree(worktree);
-  if (updated) emitRunChanged(updated);
+  // Pass the expected run id so the recording itself is identity-guarded: even if the
+  // current run changed between the check above and this write, the controller refuses
+  // rather than corrupting an unrelated run's metadata.
+  const updated = setCurrentRunWorktree(worktree, { expectedRunId });
+  if (!updated) {
+    return {
+      mode: 'worktree',
+      ok: false,
+      error:
+        'The active run changed while preparing the worktree; recording was skipped to avoid attaching it to a different run.',
+    };
+  }
+  emitRunChanged(updated);
   return { mode: 'worktree', ok: true, worktree };
 }
 
@@ -2100,8 +2134,11 @@ async function handleCleanupWorktree(
   const removed = await removeWorktree({ projectRoot, dir: target });
   if (!removed.ok) return { ok: false, error: removed.error };
 
-  if (isCurrentRunWorktree) {
-    const updated = setCurrentRunWorktree(null);
+  if (isCurrentRunWorktree && run) {
+    // Identity-guard the clear too (reviewer-a A-2): inspect/remove awaited, so only
+    // detach the worktree if the run that owned it is still current — never blank a
+    // different run's worktree metadata.
+    const updated = setCurrentRunWorktree(null, { expectedRunId: run.id });
     if (updated) emitRunChanged(updated);
   }
   console.log(`[godmode] Removed clean run worktree: ${target}`);

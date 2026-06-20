@@ -22,6 +22,7 @@ import {
   recordVerification,
   selectIssueRun,
   selectManualTaskRun,
+  setCurrentRunWorktree,
   setReviewerSessions,
   setCurrentRunReviewers,
   updateReviewerSession,
@@ -741,4 +742,48 @@ test('builder relaunch must re-validate across the async worktree gate, not trus
       `a run that left builder_running (${status}) during worktree prep must make recovery refuse`,
     );
   }
+});
+
+const SAMPLE_WORKTREE = {
+  path: '/tmp/gm-worktrees/run-55',
+  branch: 'godmode/run-55',
+  createdAt: NOW,
+};
+
+test('setCurrentRunWorktree records the worktree when the expected run is still current', () => {
+  clearRun();
+  adoptResumedRun(builderRunningRun(), NOW); // current run id === 'run-55'
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE, { expectedRunId: 'run-55' });
+  assert.ok(updated, 'recording must succeed for the matching run');
+  assert.equal(updated.id, 'run-55');
+  assert.deepEqual(updated.worktree, SAMPLE_WORKTREE);
+  // The branch is adopted as the run's working branch.
+  assert.equal(updated.branch, SAMPLE_WORKTREE.branch);
+  assert.equal(getCurrentRun().worktree.path, SAMPLE_WORKTREE.path);
+  clearRun();
+});
+
+test('setCurrentRunWorktree refuses to record a stale worktree onto a different current run (reviewer-a A-2)', () => {
+  // Models the async worktree gate: preparation began for run-55, but during the await
+  // the operator replaced the run. The prepared worktree must NOT be attached to the
+  // now-current, unrelated run — recording would corrupt its cwd/branch metadata.
+  clearRun();
+  const other = createRun({ issueNumber: 99, issueTitle: 'A different run', now: NOW, id: 'run-99' });
+  adoptResumedRun(other, NOW); // current run id === 'run-99'
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE, { expectedRunId: 'run-55' });
+  assert.equal(updated, null, 'recording must refuse when the current run is not the expected run');
+  // No stale worktree was recorded onto the unrelated run.
+  assert.equal(getCurrentRun().id, 'run-99');
+  assert.equal(getCurrentRun().worktree, undefined, 'the unrelated run must keep no worktree metadata');
+  assert.notEqual(getCurrentRun().branch, SAMPLE_WORKTREE.branch);
+  clearRun();
+});
+
+test('setCurrentRunWorktree without expectedRunId stays backward-compatible (records onto current run)', () => {
+  clearRun();
+  adoptResumedRun(builderRunningRun(), NOW);
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE);
+  assert.ok(updated);
+  assert.deepEqual(updated.worktree, SAMPLE_WORKTREE);
+  clearRun();
 });
