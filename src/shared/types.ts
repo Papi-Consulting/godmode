@@ -1,6 +1,27 @@
 export type AgentRole = 'head' | 'builder' | 'reviewer_a' | 'reviewer_b';
 
 /**
+ * Why a typed PTY delivery (issue #57) failed. Distinguishing these lets the
+ * renderer surface an actionable inline reason instead of a silent no-op:
+ * - `unknown_pane`: the target pane id is not a known role pane.
+ * - `no_live_session`: the role pane has no live PTY (e.g. a one-shot reviewer
+ *   already exited); the operator should start/restart the session and retry.
+ * - `write_failed`: a live session existed but the underlying write threw.
+ * - `invalid_payload`: the IPC payload failed validation in main.
+ */
+export type PtyWriteFailureCode = 'unknown_pane' | 'no_live_session' | 'write_failed' | 'invalid_payload';
+
+/**
+ * Result of delivering bytes to a role PTY (issue #57). Success carries the byte
+ * count actually written; failure carries a typed code + human-readable reason so
+ * main/preload/renderer can distinguish "sent" from "nothing happened" rather than
+ * the write disappearing inside the fire-and-forget path.
+ */
+export type PtyWriteResult =
+  | { ok: true; paneId: string; bytes: number }
+  | { ok: false; paneId: string; code: PtyWriteFailureCode; error: string };
+
+/**
  * Workspace isolation mode for a run's builder/fix sessions (issue #41).
  * - `shared`: builder works directly in the operated-project checkout (today's
  *   behavior, the default for one release of soak time).

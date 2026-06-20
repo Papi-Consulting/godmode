@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { deliverRoleMessage } from '../../shared/commandDispatch.js';
 
 type AgentPaneProps = {
   id: string;
@@ -21,6 +22,12 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
   const fitRef = useRef<FitAddon | null>(null);
   const runningRef = useRef(false);
   const [status, setStatus] = useState<'idle' | 'running'>('idle');
+  // Operator role-message control (issue #57): exact text + one submit char is
+  // delivered to this pane's live PTY; the field clears only on a confirmed write
+  // and shows an inline reason (e.g. no live session) otherwise.
+  const [message, setMessage] = useState('');
+  const [messageError, setMessageError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
 
   useEffect(() => {
     if (!terminalHostRef.current || terminalRef.current) return;
@@ -116,6 +123,30 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
     setStatus('idle');
   }
 
+  // Deliver the role message to this pane's live PTY. The pure helper composes the
+  // exact text + one submit char, calls the typed `sendPty`, and reports whether to
+  // clear the field — the renderer never infers delivery from terminal output.
+  async function sendMessage() {
+    if (sending) return;
+    setSending(true);
+    try {
+      const outcome = await deliverRoleMessage(id, message, (input) =>
+        window.godmode ? window.godmode.sendPty(input) : Promise.resolve(undefined),
+      );
+      setMessage(outcome.nextValue);
+      setMessageError(outcome.error);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function onMessageKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void sendMessage();
+    }
+  }
+
   return (
     <section className={`agent-pane accent-${accent}`}>
       <header className="agent-header">
@@ -149,9 +180,23 @@ export function AgentPane({ id, role, agent, commandHint, phase, accent, roleDoc
       </header>
       <div ref={terminalHostRef} className="terminal-host" />
       <div className="agent-message-row">
-        <input aria-label={`Message ${role}`} placeholder={`Message ${role.toLowerCase()}...`} />
-        <button aria-label={`Send message to ${role}`}>Send</button>
+        <input
+          aria-label={`Message ${role}`}
+          placeholder={`Message ${role.toLowerCase()}...`}
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={onMessageKeyDown}
+          disabled={sending}
+        />
+        <button aria-label={`Send message to ${role}`} onClick={() => void sendMessage()} disabled={sending}>
+          Send
+        </button>
       </div>
+      {messageError ? (
+        <p className="agent-message-error" role="alert">
+          {messageError}
+        </p>
+      ) : null}
     </section>
   );
 }

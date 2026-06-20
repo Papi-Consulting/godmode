@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import type { PtyWriteResult } from '../shared/types.js';
 
 export type PtyExit = {
   exitCode: number;
@@ -210,10 +211,42 @@ export function getPtySessionCwd(paneId: string): string | null {
   return sessionCwds.get(paneId) ?? null;
 }
 
-export function writeToPtySession(paneId: string, data: string): void {
+/**
+ * Write bytes to a role PTY and return a typed delivery result (issue #57). Unlike
+ * {@link writeToPtySession}, an unknown pane id or a pane with no live session does
+ * not silently disappear — it returns a typed failure the renderer can surface so
+ * an operator's "Send" never looks delivered when nothing was written.
+ */
+export function writeToPtySessionResult(paneId: string, data: string): PtyWriteResult {
+  if (!allowedPaneIds.has(paneId)) {
+    return { ok: false, paneId, code: 'unknown_pane', error: `Unknown pane id: ${paneId}` };
+  }
   const session = sessions.get(paneId);
-  if (!session) return;
-  session.write(data);
+  if (!session) {
+    return {
+      ok: false,
+      paneId,
+      code: 'no_live_session',
+      error: `No live ${paneId} session to deliver to. Start (or restart) the session and retry.`,
+    };
+  }
+  try {
+    session.write(data);
+    return { ok: true, paneId, bytes: Buffer.byteLength(data) };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, paneId, code: 'write_failed', error: `Failed to write to ${paneId}: ${reason}` };
+  }
+}
+
+/**
+ * Fire-and-forget PTY write retained for the internal callers (handoff/fix/reviewer
+ * prompt delivery) that already gate on {@link hasPtySession}. Delegates to
+ * {@link writeToPtySessionResult} so there is a single write code path; the result
+ * is intentionally ignored here.
+ */
+export function writeToPtySession(paneId: string, data: string): void {
+  writeToPtySessionResult(paneId, data);
 }
 
 /** Whether a live PTY session exists for the pane (e.g. before sending a prompt). */

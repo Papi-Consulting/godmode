@@ -20,6 +20,7 @@ import {
   resizePtySession,
   stopPtySession,
   writeToPtySession,
+  writeToPtySessionResult,
 } from './pty.js';
 import { getProjectState, getSelectedProjectRoot, selectProject } from './project.js';
 import {
@@ -127,6 +128,7 @@ import type {
   RunSnapshot,
   RunSourceDetail,
   RunStorageStatus,
+  PtyWriteResult,
   RunVerificationResult,
   RunWorktree,
   StartReviewersResult,
@@ -2050,6 +2052,20 @@ function handleWritePty(_event: Electron.IpcMainEvent, input: unknown) {
   writeToPtySession(payload.paneId, payload.data);
 }
 
+/**
+ * Operator role-message delivery with a typed result (issue #57). Unlike the
+ * fire-and-forget `ptyWrite` used for raw xterm typing, this returns whether the
+ * bytes reached a live PTY so the renderer can clear the field only on a confirmed
+ * write and surface a reason otherwise — never a silent no-op.
+ */
+function handleSendPty(_event: Electron.IpcMainInvokeEvent, input: unknown): PtyWriteResult {
+  const payload = parseIpcPayload(ptyWriteSchema, input);
+  if (!payload) {
+    return { ok: false, paneId: 'unknown', code: 'invalid_payload', error: 'Invalid PTY send payload.' };
+  }
+  return writeToPtySessionResult(payload.paneId, payload.data);
+}
+
 function handleResizePty(_event: Electron.IpcMainEvent, input: unknown) {
   const payload = parseIpcPayload(ptyResizeSchema, input);
   if (!payload) return;
@@ -2183,6 +2199,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.worktreeCleanup, handleCleanupWorktree);
   ipcMain.handle(GODMODE_IPC.ptyStart, handleStartPty);
   ipcMain.on(GODMODE_IPC.ptyWrite, handleWritePty);
+  ipcMain.handle(GODMODE_IPC.ptySend, handleSendPty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);
   ipcMain.on(GODMODE_IPC.ptyStop, handleStopPty);
 }
