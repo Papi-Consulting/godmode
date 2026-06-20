@@ -937,6 +937,28 @@ export type RunResumeResult =
 export type RunDiscardResult = { ok: boolean; error?: string };
 
 /**
+ * Visible state of the builder session relative to a `builder_running` run (issue
+ * #55). The live PTY sessions live only in main's process memory, so a reset/app
+ * restart can leave a run persisted as `builder_running` while the builder PTY is
+ * gone — there is then no process actually building, but the old UI only labeled
+ * the handoff a generic `blocked`. This makes that stale-session loss explicit and
+ * recoverable: `stale` is true exactly when the run is `builder_running` and no
+ * live builder PTY exists, with a `message` explaining the recovery path. Derived
+ * purely from the run + a liveness flag, so it is unit-testable and never throws.
+ */
+export type BuilderRecoveryState = {
+  /** True when the run is `builder_running` but no live builder PTY exists. */
+  stale: boolean;
+  /**
+   * Whether a PR is already bound to the run. When false, the builder may have
+   * died before opening a PR, so PR discovery (read-only) is still worth running.
+   */
+  hasBoundPr: boolean;
+  /** Human-readable banner text explaining the recovery path, set only when stale. */
+  message?: string;
+};
+
+/**
  * The reviewed builder handoff for the current run: the exact prompt GodMode
  * would write into the configured builder session, bound to the selected
  * issue/task and grounded in the harness reading rules. Producing it never sends

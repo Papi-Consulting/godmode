@@ -7,11 +7,13 @@ import { test } from 'node:test';
 import {
   DEFAULT_MAX_CYCLES,
   TRANSITION_TABLE,
+  adoptResumedRun,
   applyAction,
   clearRun,
   computeAvailableActions,
   createRun,
   dispatchRunAction,
+  evaluateBuilderRecovery,
   evaluateClearRun,
   getCurrentRun,
   recordCurrentRunPrompt,
@@ -20,6 +22,7 @@ import {
   recordVerification,
   selectIssueRun,
   selectManualTaskRun,
+  setCurrentRunWorktree,
   setReviewerSessions,
   setCurrentRunReviewers,
   updateReviewerSession,
@@ -629,5 +632,158 @@ test('reviewer controller wrappers act on the live run, null when none', () => {
   assert.equal(failed.reviewers[1].status, 'failed');
   assert.match(failed.reviewers[1].error, /command not found/);
   assert.equal(getCurrentRun().reviewers[1].status, 'failed');
+  clearRun();
+});
+
+// --- Stale builder-session detection + recovery (issue #55) ------------------
+
+/** A pure builder_running snapshot, advanced through the real transition table. */
+function builderRunningRun(overrides = {}) {
+  const created = createRun({ issueNumber: 55, issueTitle: 'Recover builder-running runs', now: NOW, id: 'run-55' });
+  const running = advance(created, ['select_issue', 'mark_ready', 'start_builder']);
+  return { ...running, ...overrides };
+}
+
+test('evaluateBuilderRecovery flags a builder_running run with no live builder PTY as stale', () => {
+  const run = builderRunningRun();
+  const recovery = evaluateBuilderRecovery(run, false);
+  assert.equal(recovery.stale, true);
+  assert.equal(recovery.hasBoundPr, false);
+  assert.match(recovery.message, /no longer live/i);
+  // No PR bound yet → the message points at a read-only discovery pass.
+  assert.match(recovery.message, /check for a PR|no PR is bound/i);
+});
+
+test('evaluateBuilderRecovery is not stale while the builder PTY is live', () => {
+  const run = builderRunningRun();
+  const recovery = evaluateBuilderRecovery(run, true);
+  assert.equal(recovery.stale, false);
+  assert.equal(recovery.message, undefined);
+});
+
+test('evaluateBuilderRecovery is not stale from any non-builder_running status', () => {
+  for (const status of ['issue_selected', 'ready_to_build', 'pr_opened', 'needs_human', 'closed']) {
+    const run = { ...builderRunningRun(), status };
+    assert.equal(evaluateBuilderRecovery(run, false).stale, false, `expected ${status} to not be stale`);
+  }
+});
+
+test('evaluateBuilderRecovery handles a null run without throwing', () => {
+  const recovery = evaluateBuilderRecovery(null, false);
+  assert.deepEqual(recovery, { stale: false, hasBoundPr: false });
+});
+
+test('evaluateBuilderRecovery tailors its message when a PR is already bound', () => {
+  const run = builderRunningRun({ prNumber: 123, branch: 'feat/x' });
+  const recovery = evaluateBuilderRecovery(run, false);
+  assert.equal(recovery.stale, true);
+  assert.equal(recovery.hasBoundPr, true);
+  assert.match(recovery.message, /#123/);
+});
+
+test('a resumed/persisted builder_running run has no live PTY and offers recovery actions', () => {
+  clearRun();
+  // Simulate a persisted builder_running run adopted on restart (issue #40 resume):
+  // the in-memory builder PTY cannot survive the restart, so liveness is false.
+  const persisted = builderRunningRun();
+  const restored = adoptResumedRun(persisted, NOW);
+  assert.equal(restored.status, 'builder_running');
+  // Recovery is visibly distinct from an actively-running builder.
+  assert.equal(evaluateBuilderRecovery(restored, false).stale, true);
+  // The explicit "mark agent failed" recovery is a legal action from builder_running.
+  assert.ok(
+    restored.availableActions.includes('report_agent_failed'),
+    'report_agent_failed must be available to recover a stale builder_running run',
+  );
+  // Marking the agent failed records an auditable transition with a reason.
+  const failed = dispatchRunAction('report_agent_failed', {
+    reason: 'Builder session was lost (no live PTY).',
+    now: NOW,
+  });
+  assert.equal(failed.ok, true);
+  assert.equal(failed.run.status, 'agent_failed');
+  const last = failed.run.log[failed.run.log.length - 1];
+  assert.equal(last.action, 'report_agent_failed');
+  assert.match(last.reason, /no live PTY/);
+  // A failed run is no longer stale (it left builder_running).
+  assert.equal(evaluateBuilderRecovery(failed.run, false).stale, false);
+  clearRun();
+});
+
+test('builder relaunch guard contract: a live builder is never stale, so relaunch must refuse it (reviewer-b B-1)', () => {
+  // handleRelaunchBuilder gates on this helper: recovery acts only on a genuinely
+  // LOST builder. With a live PTY the run is not stale, so the relaunch handler
+  // refuses rather than killing and replacing a running builder.
+  const run = builderRunningRun();
+  assert.equal(evaluateBuilderRecovery(run, true).stale, false, 'a live builder must not be treated as recoverable');
+  assert.equal(evaluateBuilderRecovery(run, false).stale, true, 'only a lost builder is recoverable');
+});
+
+test('builder relaunch must re-validate across the async worktree gate, not trust a pre-await snapshot (reviewer-b B-1)', () => {
+  // ensureRunWorktree awaits (yields the event loop). The relaunch handler's
+  // initial live-PTY/status checks are therefore only a pre-await snapshot; before
+  // the destructive openPtySession it must re-read the authoritative state and
+  // refuse if anything moved. The two failure modes that re-check map to this pure
+  // predicate are: (a) a builder PTY became live during the await, and (b) the run
+  // is no longer builder_running. Both must read as not-recoverable so the handler
+  // returns invalid_state instead of clobbering a live builder / stale context.
+  const run = builderRunningRun();
+  // (a) A PTY that appears during the await => no longer stale => relaunch refuses.
+  assert.equal(
+    evaluateBuilderRecovery(run, true).stale,
+    false,
+    'a builder PTY that becomes live during worktree prep must make recovery refuse',
+  );
+  // (b) Any drift off builder_running during the await => not stale => relaunch refuses.
+  for (const status of ['issue_selected', 'ready_to_build', 'pr_opened', 'needs_human', 'closed']) {
+    assert.equal(
+      evaluateBuilderRecovery({ ...run, status }, false).stale,
+      false,
+      `a run that left builder_running (${status}) during worktree prep must make recovery refuse`,
+    );
+  }
+});
+
+const SAMPLE_WORKTREE = {
+  path: '/tmp/gm-worktrees/run-55',
+  branch: 'godmode/run-55',
+  createdAt: NOW,
+};
+
+test('setCurrentRunWorktree records the worktree when the expected run is still current', () => {
+  clearRun();
+  adoptResumedRun(builderRunningRun(), NOW); // current run id === 'run-55'
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE, { expectedRunId: 'run-55' });
+  assert.ok(updated, 'recording must succeed for the matching run');
+  assert.equal(updated.id, 'run-55');
+  assert.deepEqual(updated.worktree, SAMPLE_WORKTREE);
+  // The branch is adopted as the run's working branch.
+  assert.equal(updated.branch, SAMPLE_WORKTREE.branch);
+  assert.equal(getCurrentRun().worktree.path, SAMPLE_WORKTREE.path);
+  clearRun();
+});
+
+test('setCurrentRunWorktree refuses to record a stale worktree onto a different current run (reviewer-a A-2)', () => {
+  // Models the async worktree gate: preparation began for run-55, but during the await
+  // the operator replaced the run. The prepared worktree must NOT be attached to the
+  // now-current, unrelated run — recording would corrupt its cwd/branch metadata.
+  clearRun();
+  const other = createRun({ issueNumber: 99, issueTitle: 'A different run', now: NOW, id: 'run-99' });
+  adoptResumedRun(other, NOW); // current run id === 'run-99'
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE, { expectedRunId: 'run-55' });
+  assert.equal(updated, null, 'recording must refuse when the current run is not the expected run');
+  // No stale worktree was recorded onto the unrelated run.
+  assert.equal(getCurrentRun().id, 'run-99');
+  assert.equal(getCurrentRun().worktree, undefined, 'the unrelated run must keep no worktree metadata');
+  assert.notEqual(getCurrentRun().branch, SAMPLE_WORKTREE.branch);
+  clearRun();
+});
+
+test('setCurrentRunWorktree without expectedRunId stays backward-compatible (records onto current run)', () => {
+  clearRun();
+  adoptResumedRun(builderRunningRun(), NOW);
+  const updated = setCurrentRunWorktree(SAMPLE_WORKTREE);
+  assert.ok(updated);
+  assert.deepEqual(updated.worktree, SAMPLE_WORKTREE);
   clearRun();
 });

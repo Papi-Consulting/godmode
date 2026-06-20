@@ -4,6 +4,7 @@ import type {
   AgentRegistryState,
   AppRepoState,
   BuilderHandoff,
+  BuilderRecoveryState,
   ClearRunResult,
   ConfirmPrCandidateResult,
   GithubIssueDetailResult,
@@ -94,6 +95,15 @@ const api = {
     expectedCommit?: string;
   }) => ipcRenderer.invoke(GODMODE_IPC.runDispatch, input) as Promise<RunActionResult>,
   clearRun: () => ipcRenderer.invoke(GODMODE_IPC.runClear) as Promise<ClearRunResult>,
+  // Stale builder-session detection + recovery (issue #55).
+  getBuilderRecovery: () =>
+    ipcRenderer.invoke(GODMODE_IPC.runBuilderRecoveryGet) as Promise<BuilderRecoveryState>,
+  relaunchBuilder: () => ipcRenderer.invoke(GODMODE_IPC.runBuilderRelaunch) as Promise<HandoffSendResult>,
+  onBuilderRecoveryChanged: (callback: (state: BuilderRecoveryState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: BuilderRecoveryState) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runBuilderRecoveryChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runBuilderRecoveryChanged, listener);
+  },
   // Run persistence / resume after restart (issue #40).
   getResumeState: () => ipcRenderer.invoke(GODMODE_IPC.runResumeGet) as Promise<RunResumeState>,
   resumeRun: () => ipcRenderer.invoke(GODMODE_IPC.runResume) as Promise<RunResumeResult>,
@@ -142,6 +152,12 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: PtyExitEvent) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.ptyExit, listener);
     return () => ipcRenderer.off(GODMODE_IPC.ptyExit, listener);
+  },
+  // Main started a PTY on the pane's behalf (e.g. builder recovery relaunch, #55).
+  onPtyStarted: (callback: (event: { paneId: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { paneId: string }) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.ptyStarted, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.ptyStarted, listener);
   },
 };
 

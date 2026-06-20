@@ -45,6 +45,7 @@ import {
   adoptResumedRun,
   clearRun,
   dispatchRunAction,
+  evaluateBuilderRecovery,
   evaluateClearRun,
   getCurrentRun,
   isTerminalStatus,
@@ -106,6 +107,7 @@ import {
 import type {
   AgentRole,
   BuilderHandoff,
+  BuilderRecoveryState,
   ClearRunResult,
   CommitVerification,
   ConfirmPrCandidateResult,
@@ -381,6 +383,12 @@ async function ensureRunWorktree(
 > {
   if (run.isolation !== 'worktree') return { mode: 'shared' };
 
+  // Snapshot the run identity and project root taken BEFORE the awaits below
+  // (`isGitRepo`, `createWorktree`). Both yield the event loop, so by the time we
+  // record the prepared worktree the operator may have cancelled/replaced the run or
+  // switched projects (reviewer-a A-2). We must not attach this run's worktree to a
+  // different run or a different project's tree.
+  const expectedRunId = run.id;
   const projectRoot = getSelectedProjectRoot();
   if (!(await isGitRepo(projectRoot))) {
     return {
@@ -405,14 +413,42 @@ async function ensureRunWorktree(
     return { mode: 'worktree', ok: false, error: created.error };
   }
 
+  // Identity-aware recording (reviewer-a A-2): `createWorktree` awaited, so the global
+  // current run / selected project may have moved out from under us during preparation.
+  // `setCurrentRunWorktree` writes to whatever run is current, so recording now could
+  // attach THIS run's worktree/branch to an unrelated run (or a different project) and
+  // persist/emit that corrupted snapshot — even before a caller's own post-await guard
+  // runs. Refuse to record if the world changed; the prepared worktree is left on disk
+  // and is harmlessly re-validated/reused on the next attempt. The caller treats this as
+  // a worktree failure and never spawns.
+  if (getCurrentRun()?.id !== expectedRunId || getSelectedProjectRoot() !== projectRoot) {
+    return {
+      mode: 'worktree',
+      ok: false,
+      error:
+        'The active run or project changed while preparing the worktree; recording was skipped to avoid attaching it to a different run.',
+    };
+  }
+
   const worktree: RunWorktree = {
     path: created.dir,
     branch: created.branch,
     // Preserve the original creation timestamp across validated reuse.
     createdAt: run.worktree?.createdAt ?? new Date().toISOString(),
   };
-  const updated = setCurrentRunWorktree(worktree);
-  if (updated) emitRunChanged(updated);
+  // Pass the expected run id so the recording itself is identity-guarded: even if the
+  // current run changed between the check above and this write, the controller refuses
+  // rather than corrupting an unrelated run's metadata.
+  const updated = setCurrentRunWorktree(worktree, { expectedRunId });
+  if (!updated) {
+    return {
+      mode: 'worktree',
+      ok: false,
+      error:
+        'The active run changed while preparing the worktree; recording was skipped to avoid attaching it to a different run.',
+    };
+  }
+  emitRunChanged(updated);
   return { mode: 'worktree', ok: true, worktree };
 }
 
@@ -582,6 +618,184 @@ async function handleSendHandoff(): Promise<HandoffSendResult> {
   }
   void tickLoop();
   return { ok: true, run: started.run };
+}
+
+// --- Stale builder-session detection + recovery (issue #55) ------------------
+
+/**
+ * Current builder-recovery state: whether the active run is `builder_running`
+ * while no live builder PTY exists (issue #55). The live-session truth lives in
+ * main's process memory (`hasPtySession`), so this binds it to the run snapshot.
+ */
+function currentBuilderRecovery(): BuilderRecoveryState {
+  return evaluateBuilderRecovery(getCurrentRun(), hasPtySession('builder'));
+}
+
+/** Push the latest builder-recovery state so the cockpit can surface/clear the banner. */
+function emitBuilderRecoveryChanged(): void {
+  emitToRenderer(GODMODE_IPC.runBuilderRecoveryChanged, currentBuilderRecovery());
+}
+
+/** Return the builder-recovery state for the active run (issue #55). */
+function handleGetBuilderRecovery(): BuilderRecoveryState {
+  return currentBuilderRecovery();
+}
+
+/**
+ * Recover a `builder_running` run whose builder PTY is gone (issue #55): relaunch
+ * the builder session and re-deliver the *existing* pointer-first handoff prompt.
+ * This is an explicit operator action — GodMode never auto-relaunches or silently
+ * re-sends. The relaunch reuses the same cwd safety gate as the original send: an
+ * isolated run's worktree is re-validated and the PTY launches inside it before any
+ * prompt is written, so re-delivery can never land in the shared checkout. The
+ * re-delivery is recorded on the run's prompt log for audit, and the run stays in
+ * `builder_running` (re-delivery records that the prompt was sent, never that the
+ * task succeeded). The alternative recovery — marking the agent failed — flows
+ * through the existing `report_agent_failed` interrupt edge.
+ *
+ * Recovery acts ONLY on a genuinely lost session (the live-PTY guard below), and the
+ * relaunched PTY shares the same renderer-ownership cleanup and a `pty:started`
+ * signal as a normal pane start, so the builder pane reflects the recovered live
+ * session instead of a process state that is not true (reviewer-a A-1 / reviewer-b
+ * B-2). See docs/architecture/builder-recovery.md.
+ */
+async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promise<HandoffSendResult> {
+  let run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to relaunch the builder for.', run: null };
+  }
+  if (run.status !== 'builder_running') {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `Builder relaunch is only available while the run is builder-running (current: ${run.status}).`,
+      run,
+    };
+  }
+  // Defense-in-depth, matching the UI (the recovery banner only renders when the
+  // run is stale): recovery is for a LOST builder, never a live one (reviewer-b
+  // B-1 / reviewer-a A-1). Refuse rather than kill+replace a running builder — that
+  // would be the opposite of #55's "don't pretend a process state that isn't true".
+  // Restarting a live builder stays the builder pane's own job.
+  if (hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The builder session is still live; relaunch only recovers a lost session. Use the builder pane to restart it.',
+      run,
+    };
+  }
+
+  // Recompose the pointer-first handoff and apply the SAME sendability gate as the
+  // original send: only a bound GitHub issue with no unresolved variables is
+  // re-deliverable (a manual task stays blocked, exactly as on first send).
+  const handoff = getCurrentHandoff(run);
+  if (!handoff.canSend) {
+    return { ok: false, code: 'not_sendable', error: handoff.blockedReason ?? 'This handoff is not ready to re-send.', run };
+  }
+
+  // Resolve the builder command exactly like a manual pane launch so a non-cli /
+  // unconfigured builder fails visibly here rather than spawning.
+  const launch = resolveRoleLaunch('builder');
+  if (!launch.ok) {
+    return { ok: false, code: 'no_builder_session', error: launch.error, run };
+  }
+
+  // Isolation (issue #41): re-validate/re-create the run worktree and launch the
+  // builder INSIDE it. A worktree failure is visible and nothing is relaunched.
+  // Snapshot the run identity and project root taken BEFORE the await so we can
+  // detect if the world moved out from under us during worktree preparation.
+  const originalRunId = run.id;
+  const projectRoot = getSelectedProjectRoot();
+  const ensured = await ensureRunWorktree(run);
+  if (ensured.mode === 'worktree' && !ensured.ok) {
+    return { ok: false, code: 'worktree_failed', error: `Run worktree setup failed: ${ensured.error}`, run: getCurrentRun() };
+  }
+  run = getCurrentRun() ?? run;
+  let cwd = projectRoot;
+  let worktreePath: string | undefined;
+  if (ensured.mode === 'worktree' && ensured.ok) {
+    cwd = ensured.worktree.path;
+    worktreePath = ensured.worktree.path;
+  }
+
+  // Re-validate the authoritative state immediately before the destructive spawn
+  // (reviewer-b B-1). The guards near the top of this handler were a pre-await
+  // snapshot, but `ensureRunWorktree` yields the event loop — during that await the
+  // operator can start the builder from the pane, switch projects, or move to a
+  // different run. `openPtySession` kills any existing builder PTY (src/main/pty.ts),
+  // so spawning now could clobber a live builder or launch from a stale run/project
+  // context. Re-read the current run, project root, and live-PTY state and refuse
+  // (typed `invalid_state`) instead of spawning if anything changed under us.
+  const liveRun = getCurrentRun();
+  if (!liveRun || liveRun.id !== originalRunId || liveRun.status !== 'builder_running') {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The active run changed while preparing the builder relaunch; recovery was preempted. Re-open the recovery banner if the run is still stale.',
+      run: liveRun,
+    };
+  }
+  if (getSelectedProjectRoot() !== projectRoot) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The selected project changed while preparing the builder relaunch; recovery was preempted.',
+      run: liveRun,
+    };
+  }
+  if (hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'A builder session became live while preparing the relaunch; recovery only recovers a lost session. Use the builder pane to restart it.',
+      run: liveRun,
+    };
+  }
+  run = liveRun;
+
+  // Take renderer ownership of the relaunched session exactly like handleStartPty:
+  // a window destroy or navigation must stop the recovered builder, never orphan it.
+  const stopOwnedSession = () => stopPtySession('builder');
+  event.sender.once('destroyed', stopOwnedSession);
+  event.sender.once('did-start-navigation', stopOwnedSession);
+
+  // Launch a fresh builder PTY (the prior session is already gone — guarded above)
+  // in the gated cwd, streaming to the builder pane just like a renderer-driven
+  // start. A builder exit still surfaces the #38 PR-discovery hint and refreshes the
+  // recovery banner.
+  const result = openPtySession({
+    paneId: 'builder',
+    projectRoot,
+    cwd,
+    worktreePath,
+    command: launch.spec.command,
+    onData: (data) => emitToRenderer(GODMODE_IPC.ptyData, { paneId: 'builder', data }),
+    onExit: (exit) => {
+      emitToRenderer(GODMODE_IPC.ptyExit, { paneId: 'builder', exit });
+      emitBuilderRecoveryChanged();
+      void handleBuilderExit();
+    },
+  });
+  if (!result.ok) {
+    return { ok: false, code: 'no_builder_session', error: `Builder relaunch failed: ${result.error}`, run };
+  }
+  // Tell the builder pane a session is now live so it reflects running/Stop-enabled
+  // state — this relaunch happened in main, not via the pane's own start() click.
+  emitToRenderer(GODMODE_IPC.ptyStarted, { paneId: 'builder' });
+
+  // Re-deliver the pointer-first prompt into the fresh PTY and record the re-send
+  // for audit (the trailing carriage return commits the line, as on first send).
+  writeToPtySession('builder', `${handoff.prompt}\r`);
+  const updated =
+    recordCurrentRunPrompt({
+      role: 'builder',
+      digest: promptDigest(handoff.prompt),
+      promptChars: handoff.prompt.length,
+    }) ?? run;
+  emitRunChanged(updated);
+  emitBuilderRecoveryChanged();
+  return { ok: true, run: updated };
 }
 
 /**
@@ -765,6 +979,9 @@ async function handleResume(): Promise<RunResumeResult> {
 
   emitRunChanged(restored);
   emitResumeChanged();
+  // A resumed `builder_running` run has no live builder PTY (it cannot survive a
+  // restart), so surface the stale-session recovery banner right away (issue #55).
+  emitBuilderRecoveryChanged();
   void tickLoop();
   return { ok: true, run: restored, routedToNeedsHuman, note };
 }
@@ -1802,7 +2019,7 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
   event.sender.once('destroyed', stopOwnedSession);
   event.sender.once('did-start-navigation', stopOwnedSession);
 
-  return openPtySession({
+  const result = openPtySession({
     paneId: payload.paneId,
     projectRoot,
     cwd,
@@ -1814,9 +2031,17 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
       // A builder pane exiting during builder_running is an observable signal that
       // the builder may have just opened a PR. Surface a non-blocking hint and run
       // one discovery pass (issue #38). This never transitions the run by itself.
-      if (payload.paneId === 'builder') void handleBuilderExit();
+      // The live builder PTY is also now gone, so refresh the recovery banner (#55).
+      if (payload.paneId === 'builder') {
+        emitBuilderRecoveryChanged();
+        void handleBuilderExit();
+      }
     },
   });
+  // Starting the builder pane clears any stale-session banner (issue #55): the run
+  // again has a live builder PTY, so the recovery state flips back to not-stale.
+  if (payload.paneId === 'builder' && result.ok) emitBuilderRecoveryChanged();
+  return result;
 }
 
 function handleWritePty(_event: Electron.IpcMainEvent, input: unknown) {
@@ -1909,8 +2134,11 @@ async function handleCleanupWorktree(
   const removed = await removeWorktree({ projectRoot, dir: target });
   if (!removed.ok) return { ok: false, error: removed.error };
 
-  if (isCurrentRunWorktree) {
-    const updated = setCurrentRunWorktree(null);
+  if (isCurrentRunWorktree && run) {
+    // Identity-guard the clear too (reviewer-a A-2): inspect/remove awaited, so only
+    // detach the worktree if the run that owned it is still current — never blank a
+    // different run's worktree metadata.
+    const updated = setCurrentRunWorktree(null, { expectedRunId: run.id });
     if (updated) emitRunChanged(updated);
   }
   console.log(`[godmode] Removed clean run worktree: ${target}`);
@@ -1931,6 +2159,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runSelectManual, handleSelectManualTask);
   ipcMain.handle(GODMODE_IPC.runDispatch, handleDispatchRun);
   ipcMain.handle(GODMODE_IPC.runClear, handleClearRun);
+  ipcMain.handle(GODMODE_IPC.runBuilderRecoveryGet, handleGetBuilderRecovery);
+  ipcMain.handle(GODMODE_IPC.runBuilderRelaunch, (event) => handleRelaunchBuilder(event));
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);

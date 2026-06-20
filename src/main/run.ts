@@ -1,5 +1,6 @@
 import type {
   AgentRole,
+  BuilderRecoveryState,
   ClearRunResult,
   CommitVerification,
   RunAction,
@@ -673,10 +674,24 @@ export function setRunWorktree(run: RunSnapshot, worktree: RunWorktree | null, n
   return { ...run, worktree, branch: worktree.branch, updatedAt: at };
 }
 
-/** Set/clear the current run's worktree (controller wrapper). Null when no run. */
-export function setCurrentRunWorktree(worktree: RunWorktree | null, now?: string): RunSnapshot | null {
+/**
+ * Set/clear the current run's worktree (controller wrapper). Null when no run.
+ *
+ * Identity guard (reviewer-a A-2): worktree preparation awaits the event loop, so by
+ * the time the caller records the prepared worktree the operator may have cancelled,
+ * replaced, or switched away from the run it was prepared for. `currentRun` is a global
+ * pointer, so an unconditional write would attach THIS run's worktree/branch metadata to
+ * whatever unrelated run is now current and persist/emit that corrupted snapshot. When
+ * `expectedRunId` is supplied this refuses (returns null, mutates nothing) unless the
+ * current run is still that exact run.
+ */
+export function setCurrentRunWorktree(
+  worktree: RunWorktree | null,
+  opts: { expectedRunId?: string; now?: string } = {},
+): RunSnapshot | null {
   if (!currentRun) return null;
-  setCurrentRun(setRunWorktree(currentRun, worktree, now));
+  if (opts.expectedRunId !== undefined && currentRun.id !== opts.expectedRunId) return null;
+  setCurrentRun(setRunWorktree(currentRun, worktree, opts.now));
   return currentRun;
 }
 
@@ -716,6 +731,37 @@ export function evaluateClearRun(
     }
   }
   return { ok: true, run: null };
+}
+
+/**
+ * Decide whether a `builder_running` run's live builder session has gone stale
+ * (issue #55). The builder PTY lives only in main's process memory, so a reset or
+ * an app restart (resume, issue #40) can leave a run persisted as `builder_running`
+ * while no builder process is actually running. Pure — the caller supplies the
+ * live-session flag (`hasPtySession('builder')`) — so it is unit-testable without a
+ * PTY and the renderer renders an explicit recovery path instead of a generic
+ * `blocked` label.
+ *
+ * `stale` is true exactly when the run is `builder_running` and the builder PTY is
+ * gone; any other status, or a live builder, is not stale. The `message` names the
+ * recovery options (relaunch + re-deliver, or mark the agent failed) and adapts to
+ * whether a PR is already bound, since a builder that died before opening a PR is
+ * still worth a read-only discovery pass.
+ */
+export function evaluateBuilderRecovery(
+  run: RunSnapshot | null,
+  hasLiveBuilderSession: boolean,
+): BuilderRecoveryState {
+  const hasBoundPr = run?.prNumber !== undefined;
+  if (!run || run.status !== 'builder_running' || hasLiveBuilderSession) {
+    return { stale: false, hasBoundPr };
+  }
+  const message = hasBoundPr
+    ? `Builder session is no longer live. PR #${run.prNumber} is bound — verify it, relaunch the builder ` +
+      'to re-deliver the handoff, or mark the agent failed.'
+    : 'Builder session is no longer live, and no PR is bound yet. Relaunch the builder to re-deliver the ' +
+      'handoff, check for a PR it may have opened, or mark the agent failed.';
+  return { stale: true, hasBoundPr, message };
 }
 
 /**

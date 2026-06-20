@@ -587,6 +587,26 @@ p {
   margin-top: 6px;
 }
 
+/* Stale builder-session recovery banner (issue #55). */
+.run-builder-recovery {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.run-builder-recovery .section-kicker {
+  color: var(--warn, #fbbf24);
+}
+
+.run-builder-recovery-message {
+  margin: 4px 0 8px;
+  font-size: 0.66rem;
+  line-height: 1.4;
+  color: var(--text-soft);
+}
+
 /* Resume-after-restart offer (issue #40). */
 .run-resume-offer {
   margin: 4px 0 10px;
