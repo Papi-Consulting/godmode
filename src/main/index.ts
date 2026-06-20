@@ -669,6 +669,9 @@ async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promis
 
   // Isolation (issue #41): re-validate/re-create the run worktree and launch the
   // builder INSIDE it. A worktree failure is visible and nothing is relaunched.
+  // Snapshot the run identity and project root taken BEFORE the await so we can
+  // detect if the world moved out from under us during worktree preparation.
+  const originalRunId = run.id;
   const projectRoot = getSelectedProjectRoot();
   const ensured = await ensureRunWorktree(run);
   if (ensured.mode === 'worktree' && !ensured.ok) {
@@ -681,6 +684,41 @@ async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promis
     cwd = ensured.worktree.path;
     worktreePath = ensured.worktree.path;
   }
+
+  // Re-validate the authoritative state immediately before the destructive spawn
+  // (reviewer-b B-1). The guards near the top of this handler were a pre-await
+  // snapshot, but `ensureRunWorktree` yields the event loop — during that await the
+  // operator can start the builder from the pane, switch projects, or move to a
+  // different run. `openPtySession` kills any existing builder PTY (src/main/pty.ts),
+  // so spawning now could clobber a live builder or launch from a stale run/project
+  // context. Re-read the current run, project root, and live-PTY state and refuse
+  // (typed `invalid_state`) instead of spawning if anything changed under us.
+  const liveRun = getCurrentRun();
+  if (!liveRun || liveRun.id !== originalRunId || liveRun.status !== 'builder_running') {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The active run changed while preparing the builder relaunch; recovery was preempted. Re-open the recovery banner if the run is still stale.',
+      run: liveRun,
+    };
+  }
+  if (getSelectedProjectRoot() !== projectRoot) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The selected project changed while preparing the builder relaunch; recovery was preempted.',
+      run: liveRun,
+    };
+  }
+  if (hasPtySession('builder')) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'A builder session became live while preparing the relaunch; recovery only recovers a lost session. Use the builder pane to restart it.',
+      run: liveRun,
+    };
+  }
+  run = liveRun;
 
   // Take renderer ownership of the relaunched session exactly like handleStartPty:
   // a window destroy or navigation must stop the recovered builder, never orphan it.

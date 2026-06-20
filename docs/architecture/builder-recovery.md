@@ -49,10 +49,20 @@ two explicit operator actions. GodMode never auto-relaunches or silently re-send
 `runBuilderRelaunch` (`handleRelaunchBuilder`) relaunches the builder PTY and
 re-delivers the *existing* pointer-first handoff prompt. Its contract:
 
-- **Lost-session only.** It refuses (`invalid_state`) when a builder PTY is still
-  live. Recovery is for a genuinely lost session; restarting a live builder stays
-  the builder pane's own job. This mirrors the detection helper and the UI gate, so
-  a stale-renderer or race can never kill-and-replace a running builder.
+- **Lost-session only, re-checked across the async boundary.** It refuses
+  (`invalid_state`) when a builder PTY is still live. Recovery is for a genuinely
+  lost session; restarting a live builder stays the builder pane's own job. This
+  mirrors the detection helper and the UI gate, so a stale-renderer or race can
+  never kill-and-replace a running builder. Because `ensureRunWorktree` awaits (it
+  yields the event loop), the live-PTY check alone would be a pre-await snapshot —
+  the operator could start the builder, switch projects, or move to another run
+  during that await, and `openPtySession` would then kill any existing builder PTY
+  and spawn from a stale context. So **immediately before the destructive spawn**
+  the handler re-reads the authoritative state and refuses (`invalid_state`) if any
+  of these changed since the snapshot: the current run is no longer the same run id,
+  the run is no longer `builder_running`, the selected project root changed, or a
+  builder PTY became live. The guard is the authority just before the spawn, not a
+  stale snapshot.
 - **Same cwd safety gate as the original send.** For an isolated run (issue #41)
   the worktree is re-validated/re-created via `ensureRunWorktree` and the PTY is
   launched **inside** it before any prompt is written, so re-delivery can never land

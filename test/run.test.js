@@ -717,3 +717,28 @@ test('builder relaunch guard contract: a live builder is never stale, so relaunc
   assert.equal(evaluateBuilderRecovery(run, true).stale, false, 'a live builder must not be treated as recoverable');
   assert.equal(evaluateBuilderRecovery(run, false).stale, true, 'only a lost builder is recoverable');
 });
+
+test('builder relaunch must re-validate across the async worktree gate, not trust a pre-await snapshot (reviewer-b B-1)', () => {
+  // ensureRunWorktree awaits (yields the event loop). The relaunch handler's
+  // initial live-PTY/status checks are therefore only a pre-await snapshot; before
+  // the destructive openPtySession it must re-read the authoritative state and
+  // refuse if anything moved. The two failure modes that re-check map to this pure
+  // predicate are: (a) a builder PTY became live during the await, and (b) the run
+  // is no longer builder_running. Both must read as not-recoverable so the handler
+  // returns invalid_state instead of clobbering a live builder / stale context.
+  const run = builderRunningRun();
+  // (a) A PTY that appears during the await => no longer stale => relaunch refuses.
+  assert.equal(
+    evaluateBuilderRecovery(run, true).stale,
+    false,
+    'a builder PTY that becomes live during worktree prep must make recovery refuse',
+  );
+  // (b) Any drift off builder_running during the await => not stale => relaunch refuses.
+  for (const status of ['issue_selected', 'ready_to_build', 'pr_opened', 'needs_human', 'closed']) {
+    assert.equal(
+      evaluateBuilderRecovery({ ...run, status }, false).stale,
+      false,
+      `a run that left builder_running (${status}) during worktree prep must make recovery refuse`,
+    );
+  }
+});
