@@ -200,13 +200,20 @@ export function canMarkMergeReady(run: RunSnapshot): boolean {
   const findings = run.findings;
   if (!findings || findings.merge.mergeReady !== true) return false;
   const latest = latestRunVerification(run);
-  if (!latest || latest.status !== 'verified' || latest.currentHeadVerified === false) return false;
+  if (!latest || latest.status !== 'verified') return false;
+  // Current-head proof must be explicit and positive. A legacy/pre-#61 or
+  // malformed verification entry that omits `currentHeadVerified` is *not*
+  // current-head evidence, so absence is rejected exactly like an explicit
+  // `false` — only `=== true` clears this gate (issues #61, #62).
+  if (latest.currentHeadVerified !== true) return false;
   // The positive synthesis must still apply to the head the latest verification
-  // confirmed: if the head drifted afterwards, the findings are stale evidence and
-  // the gate must re-derive (synthesis) against the new head before merge-ready.
+  // confirmed. Both heads must be present *and* match: a missing
+  // `findings.prHeadSha` or `latest.verifiedHeadSha` is not proof the two refer
+  // to the same current head, so the gate cannot assume agreement from absence —
+  // and post-synthesis head drift can never leave a stale "merge-ready" standing.
   if (
-    findings.prHeadSha !== undefined &&
-    latest.verifiedHeadSha !== undefined &&
+    findings.prHeadSha === undefined ||
+    latest.verifiedHeadSha === undefined ||
     !commitMatches(findings.prHeadSha, latest.verifiedHeadSha)
   ) {
     return false;

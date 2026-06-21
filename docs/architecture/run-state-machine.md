@@ -151,8 +151,13 @@ and are merged into the table in one place:
 - `exceed_max_cycles` → `max_cycles_exceeded`
 
 `needs_human`, `agent_failed`, and `max_cycles_exceeded` are recoverable: the
-operator can route back to `ready_to_build`, force `merge_ready`, `cancel`, or
-`close` as appropriate.
+operator can route back to `ready_to_build`, `cancel`, or `close` as appropriate.
+`merge_ready` is **not** an evidence-free recovery option — there is no force path
+in v1. It is reachable from these statuses only when `canMarkMergeReady` is
+satisfied (real, current, positive evidence: positive synthesis findings plus a
+latest current-head `verified` verification whose head still matches), exactly as
+from `review_synthesis`. The recovery move when evidence is missing or stale is to
+route back to `ready_to_build` and re-derive it, not to override the gate.
 
 ## Reconciling the spec states
 

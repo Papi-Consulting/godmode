@@ -1147,6 +1147,55 @@ test('#62 stale / non-current-head verification cannot mark merge-ready', () => 
   assert.equal(applyAction(driftedHead, 'mark_merge_ready', { now: NOW }).ok, false);
 });
 
+test('#62 verification missing current-head fields cannot mark merge-ready (BLOCKING A-1/B-1)', () => {
+  const synth = synthesisRun('run-62-loose-evidence');
+
+  // A `status: 'verified'` entry that omits `currentHeadVerified` (legacy/pre-#61
+  // or malformed snapshot) is NOT current-head proof. Absence must be rejected
+  // exactly like an explicit `false` — never treated as agreement.
+  const noCurrentHeadFlag = {
+    ...synth,
+    findings: mergeReadyFindings(synth),
+    verifications: [verificationEntry({ currentHeadVerified: undefined })],
+  };
+  assert.equal(
+    canMarkMergeReady(noCurrentHeadFlag),
+    false,
+    'omitted currentHeadVerified → not merge-ready',
+  );
+  const r1 = applyAction(noCurrentHeadFlag, 'mark_merge_ready', { now: NOW });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.code, 'merge_evidence_required');
+  assert.equal(r1.run.status, 'review_synthesis', 'rejection must not mutate the run');
+  assert.ok(!computeAvailableActions(noCurrentHeadFlag).includes('mark_merge_ready'));
+
+  // An entry that omits `verifiedHeadSha` cannot prove the findings head and the
+  // verified head are the same current head — absence is not a match.
+  const noVerifiedHead = {
+    ...synth,
+    findings: mergeReadyFindings(synth),
+    verifications: [verificationEntry({ verifiedHeadSha: undefined })],
+  };
+  assert.equal(
+    canMarkMergeReady(noVerifiedHead),
+    false,
+    'omitted verifiedHeadSha → not merge-ready',
+  );
+  assert.equal(applyAction(noVerifiedHead, 'mark_merge_ready', { now: NOW }).ok, false);
+
+  // Findings missing their own head likewise cannot be proven current-head.
+  const noFindingsHead = { ...synth, verifications: [verificationEntry()] };
+  const findingsNoHead = mergeReadyFindings(synth);
+  findingsNoHead.prHeadSha = undefined;
+  noFindingsHead.findings = findingsNoHead;
+  assert.equal(
+    canMarkMergeReady(noFindingsHead),
+    false,
+    'omitted findings.prHeadSha → not merge-ready',
+  );
+  assert.equal(applyAction(noFindingsHead, 'mark_merge_ready', { now: NOW }).ok, false);
+});
+
 test('#62 missing verification (positive findings only) cannot mark merge-ready', () => {
   const synth = synthesisRun('run-62-noverify');
   const run = { ...synth, findings: mergeReadyFindings(synth) }; // no verifications recorded
