@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import {
   DEFAULT_MAX_CYCLES,
   TRANSITION_TABLE,
+  adoptCurrentRunExpectedCommit,
+  adoptExpectedCommit,
   adoptResumedRun,
   applyAction,
   clearRun,
@@ -16,10 +18,13 @@ import {
   evaluateBuilderRecovery,
   evaluateClearRun,
   getCurrentRun,
+  latestRunVerification,
+  observedHeadDrifted,
   recordCurrentRunPrompt,
   recordCurrentRunVerification,
   recordPromptSent,
   recordVerification,
+  selectObservedBoundPrHead,
   selectIssueRun,
   selectManualTaskRun,
   setCurrentRunWorktree,
@@ -542,6 +547,7 @@ function verification(overrides = {}) {
     pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'c'.repeat(40), headShaShort: 'ccccccc' },
     commitInList: true,
     matchesHead: true,
+    currentHeadVerified: true,
     checks: { total: 1, passing: 1, pending: 0, failing: 0 },
     prState: 'OPEN',
     mergeConfirmed: false,
@@ -562,8 +568,181 @@ test('recordVerification appends an audit entry without mutating the input', () 
   assert.equal(entry.source, 'run_recorded');
   assert.equal(entry.prNumber, 9);
   assert.equal(entry.prState, 'OPEN');
+  // Issue #61: the observed head and current-head flag are recorded so a later
+  // pass can detect head drift and merge gates consume only current-head evidence.
+  assert.equal(entry.verifiedHeadSha, 'c'.repeat(40));
+  assert.equal(entry.currentHeadVerified, true);
   assert.equal(entry.at, NOW);
   assert.equal(updated.updatedAt, NOW);
+});
+
+test('recordVerification records a stale-head result as not current-head verified (issue #61)', () => {
+  const run = createRun({ issueNumber: 9, now: NOW, id: 'run-stale' });
+  // The expected commit is in PR history but the head moved to a newer commit.
+  const stale = verification({
+    status: 'stale_head',
+    matchesHead: false,
+    currentHeadVerified: false,
+    pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'd'.repeat(40), headShaShort: 'ddddddd' },
+  });
+  const updated = recordVerification(run, stale);
+  const entry = updated.verifications[0];
+  assert.equal(entry.status, 'stale_head');
+  // The recorded head is the NEW head, and the entry is flagged not-current so a
+  // merge-ready decision can never consume it as current-head evidence.
+  assert.equal(entry.verifiedHeadSha, 'd'.repeat(40));
+  assert.equal(entry.currentHeadVerified, false);
+});
+
+test('latestRunVerification returns the most recent entry or null (issue #61)', () => {
+  const base = createRun({ issueNumber: 9, now: NOW, id: 'run-latest' });
+  assert.equal(latestRunVerification(base), null);
+  const one = recordVerification(base, verification({ status: 'missing_remote_commit' }));
+  const two = recordVerification(one, verification());
+  assert.equal(latestRunVerification(two).status, 'verified');
+});
+
+test('observedHeadDrifted detects an observed bound-PR head that moved off the verified head (issue #61)', () => {
+  // A run bound to PR #9 with a recorded verification computed against head C.
+  const base = createRun({ issueNumber: 9, now: NOW, id: 'run-drift' });
+  const bound = recordVerification({ ...base, prNumber: 9, expectedCommit: 'c'.repeat(40) }, verification());
+  // Observing the SAME head (full or abbreviated) is not drift.
+  assert.equal(observedHeadDrifted(bound, 9, 'c'.repeat(40)), false);
+  assert.equal(observedHeadDrifted(bound, 9, 'c'.repeat(7)), false);
+  // Observing a NEW head on the bound PR IS drift — the observe-without-manual-
+  // reverify path must mark the displayed evidence stale.
+  assert.equal(observedHeadDrifted(bound, 9, 'd'.repeat(40)), true);
+  // A different PR number, a missing observed head, or no recorded verification
+  // never drifts (there is no current-head claim to invalidate).
+  assert.equal(observedHeadDrifted(bound, 42, 'd'.repeat(40)), false);
+  assert.equal(observedHeadDrifted(bound, 9, ''), false);
+  assert.equal(observedHeadDrifted(bound, undefined, 'd'.repeat(40)), false);
+  assert.equal(observedHeadDrifted({ ...base, prNumber: 9 }, 9, 'd'.repeat(40)), false);
+});
+
+test('observe-without-manual-reverify: drift triggers a stale_head record that is not current-head verified (issue #61)', () => {
+  // Start from a green verification at head C (as if reviewers passed on C).
+  const base = createRun({ issueNumber: 9, now: NOW, id: 'run-observe' });
+  const verified = recordVerification({ ...base, prNumber: 9, expectedCommit: 'c'.repeat(40) }, verification());
+  assert.equal(latestRunVerification(verified).currentHeadVerified, true);
+  // GodMode OBSERVES the bound PR at a new head D (GitHub refresh / discovery pass)
+  // with no manual Re-verify click — the drift trigger fires...
+  assert.equal(observedHeadDrifted(verified, 9, 'd'.repeat(40)), true);
+  // ...and main re-derives + records a stale_head result, so the displayed evidence
+  // is staled rather than lingering as a green 'verified' for the old head.
+  const reconciled = recordVerification(
+    verified,
+    verification({
+      status: 'stale_head',
+      matchesHead: false,
+      currentHeadVerified: false,
+      pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'd'.repeat(40), headShaShort: 'ddddddd' },
+    }),
+  );
+  const entry = latestRunVerification(reconciled);
+  assert.equal(entry.status, 'stale_head');
+  assert.equal(entry.currentHeadVerified, false);
+  assert.equal(entry.verifiedHeadSha, 'd'.repeat(40));
+  // A subsequent observation of the SAME (now recorded) head no longer drifts.
+  assert.equal(observedHeadDrifted(reconciled, 9, 'd'.repeat(40)), false);
+});
+
+test('selectObservedBoundPrHead picks the bound PR from the pull list, independent of the checkout branch (issue #61)', () => {
+  const boundAtNewHead = { number: 9, headSha: 'd'.repeat(40) };
+  const otherPr = { number: 12, headSha: 'e'.repeat(40) };
+  // Shared checkout: the active PR is the bound PR; either source observes head D.
+  assert.deepEqual(
+    selectObservedBoundPrHead({ activePr: { number: 9, headSha: 'd'.repeat(40) }, pulls: [boundAtNewHead] }, 9),
+    boundAtNewHead,
+  );
+  // The pull-list match takes precedence over the active PR so the bound head wins.
+  assert.deepEqual(
+    selectObservedBoundPrHead({ activePr: { number: 12, headSha: 'e'.repeat(40) }, pulls: [otherPr, boundAtNewHead] }, 9),
+    boundAtNewHead,
+  );
+  // Unbound run (no prNumber) falls back to the current-branch active PR.
+  assert.deepEqual(
+    selectObservedBoundPrHead({ activePr: { number: 12, headSha: 'e'.repeat(40) }, pulls: [otherPr] }, undefined),
+    otherPr,
+  );
+  // A bound PR present in the list but without a head SHA is not observable; with no
+  // active PR either, there is nothing to reconcile.
+  assert.equal(selectObservedBoundPrHead({ activePr: null, pulls: [{ number: 9, headSha: '' }] }, 9), null);
+  assert.equal(selectObservedBoundPrHead({ activePr: null, pulls: [] }, 9), null);
+});
+
+test('worktree-isolated pr_opened run: GitHub refresh stales evidence from the pull list without a manual re-verify (issue #61, reviewer A-1/B-1)', () => {
+  // A worktree-isolated run bound to PR #9, green-verified at head C (reviewers
+  // passed on C). The run's PR branch lives in the run worktree; the primary
+  // checkout sits on a DIFFERENT branch, so the current-branch active PR is some
+  // other PR (#12) — or none — and can never observe PR #9's head.
+  const base = createRun({ issueNumber: 9, now: NOW, id: 'run-wt' });
+  const opened = advance(base, [
+    'select_issue',
+    'mark_ready',
+    'start_builder',
+    { action: 'open_pr', options: { branch: 'fe/issue-9', prNumber: 9 } },
+  ]);
+  assert.equal(opened.status, 'pr_opened');
+  assert.equal(opened.prNumber, 9);
+  const verified = recordVerification({ ...opened, expectedCommit: 'c'.repeat(40) }, verification());
+  assert.equal(latestRunVerification(verified).currentHeadVerified, true);
+
+  // GitHub refresh: the active PR is the primary checkout's branch PR (#12), NOT the
+  // bound PR. The repo-wide pull list, however, lists PR #9 at a NEW head D.
+  const snapshot = {
+    activePr: { number: 12, headSha: 'a'.repeat(40) },
+    pulls: [
+      { number: 12, headSha: 'a'.repeat(40) },
+      { number: 9, headSha: 'd'.repeat(40) },
+    ],
+  };
+  // Selection resolves the bound PR head from the pull list (not the active PR)...
+  const observed = selectObservedBoundPrHead(snapshot, verified.prNumber);
+  assert.deepEqual(observed, { number: 9, headSha: 'd'.repeat(40) });
+  // ...and that observed head drifts off the recorded verification head C.
+  assert.equal(observedHeadDrifted(verified, observed.number, observed.headSha), true);
+
+  // Had selection only used the active PR (the pre-fix behavior), the observation
+  // would be PR #12 — which never drifts the bound run, so the stale green evidence
+  // for head C would linger. This is the regression the reviewers flagged.
+  assert.equal(observedHeadDrifted(verified, snapshot.activePr.number, snapshot.activePr.headSha), false);
+
+  // Reconciliation re-derives + records stale_head against the now-old expected
+  // commit, so the displayed evidence stales with no manual Re-verify.
+  const reconciled = recordVerification(
+    verified,
+    verification({
+      status: 'stale_head',
+      matchesHead: false,
+      currentHeadVerified: false,
+      pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'fe/issue-9', headSha: 'd'.repeat(40), headShaShort: 'ddddddd' },
+    }),
+  );
+  const entry = latestRunVerification(reconciled);
+  assert.equal(entry.status, 'stale_head');
+  assert.equal(entry.currentHeadVerified, false);
+  assert.equal(entry.verifiedHeadSha, 'd'.repeat(40));
+});
+
+test('adoptExpectedCommit re-records the head without mutating the input (issue #61)', () => {
+  const base = createRun({ issueNumber: 9, now: NOW, id: 'run-adopt' });
+  const run = { ...base, expectedCommit: 'c'.repeat(40) };
+  const later = '2026-06-06T13:00:00.000Z';
+  const adopted = adoptExpectedCommit(run, 'd'.repeat(40), later);
+  assert.equal(run.expectedCommit, 'c'.repeat(40), 'input snapshot is not mutated');
+  assert.equal(adopted.expectedCommit, 'd'.repeat(40));
+  assert.equal(adopted.updatedAt, later);
+});
+
+test('adoptCurrentRunExpectedCommit adopts against the live run, null when none (issue #61)', () => {
+  clearRun();
+  assert.equal(adoptCurrentRunExpectedCommit('d'.repeat(40)), null);
+  selectIssueRun({ issueNumber: 9, issueTitle: 'Adopt head' });
+  const adopted = adoptCurrentRunExpectedCommit('d'.repeat(40), NOW);
+  assert.equal(adopted.expectedCommit, 'd'.repeat(40));
+  assert.equal(getCurrentRun().expectedCommit, 'd'.repeat(40));
+  clearRun();
 });
 
 test('recordCurrentRunVerification records against the live run, null when none', () => {

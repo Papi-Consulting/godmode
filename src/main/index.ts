@@ -44,6 +44,7 @@ import {
   tickLoop,
 } from './loop.js';
 import {
+  adoptCurrentRunExpectedCommit,
   adoptResumedRun,
   clearRun,
   dispatchRunAction,
@@ -51,6 +52,8 @@ import {
   evaluateClearRun,
   getCurrentRun,
   isTerminalStatus,
+  observedHeadDrifted,
+  selectObservedBoundPrHead,
   recordCurrentRunPrompt,
   recordCurrentRunVerification,
   selectIssueRun,
@@ -123,6 +126,7 @@ import type {
   BuilderHandoff,
   BuilderRecoveryState,
   ClearRunResult,
+  AdoptHeadResult,
   CommitVerification,
   ConfirmPrCandidateResult,
   HandoffSendResult,
@@ -364,8 +368,62 @@ async function handleBrowseProject() {
   return selectProjectAndResetSessions(result.filePaths[0]);
 }
 
-function handleGetGithub() {
-  return getGithubState(getSelectedProjectRoot(), new Date().toISOString());
+async function handleGetGithub() {
+  const root = getSelectedProjectRoot();
+  const state = await getGithubState(root, new Date().toISOString());
+  // Issue #61: a GitHub refresh is the standing observation channel for a bound PR
+  // after it leaves builder_running. If it observed the bound PR at a head that no
+  // longer matches the run's latest recorded verification, re-derive verification
+  // now (it becomes `stale_head` against the old expected commit) so the pane
+  // stales without waiting for a manual re-verify, reviewer launch, or synthesis.
+  //
+  // The bound PR head is selected from the repo-wide pull list when the run is
+  // bound, falling back to the current-branch active PR. This is what makes the
+  // path work for worktree-isolated runs (issue #41): their PR branch lives in the
+  // run worktree, so the primary checkout's active PR never observes the bound head
+  // — only the pull-list match (by `run.prNumber`) does.
+  const observed = selectObservedBoundPrHead(state, getCurrentRun()?.prNumber);
+  if (observed) {
+    void reconcileObservedHead(root, observed.number, observed.headSha);
+  }
+  return state;
+}
+
+/**
+ * Reconcile a newly observed bound-PR head against the run's recorded verification
+ * (issue #61). When GodMode observes the bound PR at a head SHA that differs from
+ * the head the latest recorded verification was computed against, the displayed
+ * evidence is for a stale head — it could still read as a green `verified` for an
+ * old commit the reviewers never reviewed at the current head. This re-runs the #9
+ * gate live against the run's recorded expected commit/branch (deriving
+ * `stale_head`), records it, and pushes the fresh result so the pane updates
+ * immediately. Never mutates run state beyond appending the verification entry, and
+ * is a no-op unless a bound run actually drifted, so it is safe to call on every
+ * GitHub refresh / discovery observation.
+ *
+ * Capture-and-recheck guards the async `gh` round trip exactly like the gating
+ * handlers: a project switch or run replacement during the await abandons the
+ * reconciliation rather than patching verification onto a run/root it no longer owns.
+ */
+async function reconcileObservedHead(
+  root: string,
+  observedPrNumber: number,
+  observedHeadSha: string,
+): Promise<void> {
+  const run = getCurrentRun();
+  if (!run || !observedHeadDrifted(run, observedPrNumber, observedHeadSha)) return;
+  const captured = { runId: run.id, root };
+  const verification = await getCommitVerification(
+    root,
+    { expectedCommit: run.expectedCommit, branch: run.branch },
+    new Date().toISOString(),
+  );
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return;
+  }
+  const updated = recordCurrentRunVerification(verification);
+  if (updated) emitRunChanged(updated);
+  emitToRenderer(GODMODE_IPC.runVerificationChanged, verification);
 }
 
 /** Resolve the operated project's configured workspace isolation (issue #41). */
@@ -840,6 +898,118 @@ async function handleVerifyRun(): Promise<RunVerificationResult> {
   return { verification, run: updatedRun };
 }
 
+/**
+ * Operator-initiated "adopt current head" recovery (issue #61, blocker B-2). After
+ * a follow-up push moves the bound PR head, the run's recorded expected commit is
+ * stale and every re-verify/reviewer-launch keeps deriving `stale_head` — no normal
+ * forward action re-records the new head, so the run is stuck. This guarded, audited
+ * path reads the live bound PR, confirms it still matches the run's PR number/branch,
+ * re-records the observed head as the run's expected commit, and re-verifies against
+ * it (the recorded verification is the audit trail of the adoption). Nothing is
+ * mutated unless a bound run actually drifted on its own PR, so a closed/replaced PR
+ * or a project switch mid-flight can never silently retarget the run.
+ */
+async function handleAdoptHead(): Promise<AdoptHeadResult> {
+  const run = getCurrentRun();
+  if (!run) {
+    return { ok: false, code: 'no_run', error: 'There is no active run to adopt a PR head for.', run: null };
+  }
+  if (run.prNumber === undefined) {
+    return {
+      ok: false,
+      code: 'no_pr_bound',
+      error: 'The active run has no bound PR; adopt-head only applies once a PR is bound to the run.',
+      run,
+    };
+  }
+  if (isTerminalStatus(run.status)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: `The run is ${run.status}; adopt-head only applies to an in-flight run.`,
+      run,
+    };
+  }
+
+  const root = getSelectedProjectRoot();
+  const captured = { runId: run.id, root };
+
+  // Read the live bound PR (against the run's current, possibly-stale expected
+  // commit) so the observed head is GitHub's, never an agent self-report.
+  const observed = await getCommitVerification(
+    root,
+    { expectedCommit: run.expectedCommit, branch: run.branch },
+    new Date().toISOString(),
+  );
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The active run or project changed while adopting the PR head; the recovery was preempted.',
+      run: getCurrentRun(),
+    };
+  }
+
+  // Confirm the live PR still matches the bound run before retargeting anything: a
+  // closed/replaced PR or a branch that now resolves to a different PR is refused.
+  if (!observed.pr || observed.pr.number !== run.prNumber) {
+    return {
+      ok: false,
+      code: 'pr_mismatch',
+      error: `The live PR for branch "${run.branch ?? ''}" no longer matches bound PR #${run.prNumber}; refusing to retarget the run.`,
+      run,
+      verification: observed,
+    };
+  }
+  if (run.branch && observed.pr.headRefName && run.branch !== observed.pr.headRefName) {
+    return {
+      ok: false,
+      code: 'pr_mismatch',
+      error: `PR #${observed.pr.number} head branch "${observed.pr.headRefName}" no longer matches the run's bound branch "${run.branch}".`,
+      run,
+      verification: observed,
+    };
+  }
+
+  // Only adopt when the head genuinely drifted — already-current-head evidence
+  // (matches head, or merged) has nothing to recover.
+  const newHead = observed.pr.headSha;
+  if (!newHead || observed.currentHeadVerified) {
+    return {
+      ok: false,
+      code: 'not_drifted',
+      error: "The bound PR head already matches the run's verified evidence; there is no newer head to adopt.",
+      run,
+      verification: observed,
+    };
+  }
+
+  // Re-record the observed head as the run's expected commit, then re-verify against
+  // it. The second verification is the audit trail: it is recorded on the run and
+  // should now read as current-head verified (matchesHead true).
+  const adopted = adoptCurrentRunExpectedCommit(newHead);
+  if (!adopted) {
+    return { ok: false, code: 'no_run', error: 'The active run was cleared while adopting the PR head.', run: null };
+  }
+  const verification = await getCommitVerification(
+    root,
+    { expectedCommit: newHead, branch: adopted.branch },
+    new Date().toISOString(),
+  );
+  if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
+    return {
+      ok: false,
+      code: 'invalid_state',
+      error: 'The active run or project changed while adopting the PR head; the recovery was preempted.',
+      run: getCurrentRun(),
+    };
+  }
+  const recorded = recordCurrentRunVerification(verification) ?? adopted;
+  emitRunChanged(recorded);
+  emitToRenderer(GODMODE_IPC.runVerificationChanged, verification);
+  return { ok: true, run: recorded, verification };
+}
+
 /** Push a payload to the renderer if a live window exists (mirrors `projectChanged`). */
 function emitToRenderer(channel: string, payload: unknown): void {
   if (mainWindow && !mainWindow.webContents.isDestroyed()) {
@@ -1065,19 +1235,38 @@ function discoveryContext(run: RunSnapshot): DiscoveryContext {
  * with no active run it returns an error-status result with no candidates, and
  * every `gh` failure folds into the result so the run stays in `builder_running`.
  */
-function handleDiscoverPr(): Promise<PrDiscoveryResult> {
+async function handleDiscoverPr(): Promise<PrDiscoveryResult> {
   const now = new Date().toISOString();
   const run = getCurrentRun();
   if (!run) {
-    return Promise.resolve({
+    return {
       status: 'error',
       message: 'There is no active run to discover a PR for.',
       candidates: [],
       recommendedPrNumber: null,
       fetchedAt: now,
-    });
+    };
   }
-  return discoverRunPrCandidates(getSelectedProjectRoot(), discoveryContext(run), now);
+  const root = getSelectedProjectRoot();
+  const discovery = await discoverRunPrCandidates(root, discoveryContext(run), now);
+  // Issue #61: a discovery pass also observes bound-PR heads. If a candidate is the
+  // run's bound PR at a drifted head, stale the displayed verification immediately.
+  reconcileObservedHeadFromDiscovery(root, discovery);
+  return discovery;
+}
+
+/**
+ * Reconcile the bound PR's head from a discovery result (issue #61). Discovery
+ * candidates each carry the observed head SHA, so a pass that lists the run's bound
+ * PR at a moved head can stale the displayed verification the same way a GitHub
+ * refresh does. A no-op unless a candidate matches the bound PR number and drifted.
+ */
+function reconcileObservedHeadFromDiscovery(root: string, discovery: PrDiscoveryResult): void {
+  const run = getCurrentRun();
+  if (!run || run.prNumber === undefined) return;
+  const boundCandidate = discovery.candidates.find((candidate) => candidate.number === run.prNumber);
+  if (!boundCandidate) return;
+  void reconcileObservedHead(root, boundCandidate.number, boundCandidate.headSha);
 }
 
 /**
@@ -1184,6 +1373,8 @@ async function handleBuilderExit(): Promise<void> {
     hint: 'Builder session ended — check for the PR it opened.',
     discovery,
   });
+  // Issue #61: the same pass may have observed an already-bound PR at a moved head.
+  reconcileObservedHeadFromDiscovery(captured.root, discovery);
 }
 
 /**
@@ -1438,7 +1629,11 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
   }
 
   let updated = recordCurrentRunVerification(verification) ?? run;
-  if (verification.status !== 'verified' || !verification.pr) {
+  // Issue #61: reviewers may only launch against current-head evidence. A
+  // `stale_head` result (the expected commit is still in PR history but the head
+  // moved on) is not `verified`, and `currentHeadVerified` is required explicitly
+  // so presence-in-history can never gate a launch after a newer head appears.
+  if (verification.status !== 'verified' || !verification.pr || !verification.currentHeadVerified) {
     emitRunChanged(updated);
     return { ok: false, code: 'not_verified', error: verification.message, run: updated, verification };
   }
@@ -2319,6 +2514,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.runHandoffGet, handleGetHandoff);
   ipcMain.handle(GODMODE_IPC.runHandoffSend, handleSendHandoff);
   ipcMain.handle(GODMODE_IPC.runVerify, handleVerifyRun);
+  ipcMain.handle(GODMODE_IPC.runAdoptHead, handleAdoptHead);
   ipcMain.handle(GODMODE_IPC.runPrDiscover, handleDiscoverPr);
   ipcMain.handle(GODMODE_IPC.runPrConfirm, handleConfirmPrCandidate);
   // Operator-triggered launches/synthesis default to the operator actor; the loop

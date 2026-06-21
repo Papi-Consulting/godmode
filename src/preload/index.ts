@@ -1,11 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { PtyExit, PtyStartResult } from '../main/pty.js';
 import type {
+  AdoptHeadResult,
   AgentRegistryState,
   AppRepoState,
   BuilderHandoff,
   BuilderRecoveryState,
   ClearRunResult,
+  CommitVerification,
   ConfirmPrCandidateResult,
   GithubIssueDetailResult,
   GithubState,
@@ -65,6 +67,10 @@ const api = {
   getHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffGet) as Promise<BuilderHandoff>,
   sendHandoff: () => ipcRenderer.invoke(GODMODE_IPC.runHandoffSend) as Promise<HandoffSendResult>,
   verifyCommit: () => ipcRenderer.invoke(GODMODE_IPC.runVerify) as Promise<RunVerificationResult>,
+  // Operator "adopt current head" recovery (issue #61): re-record the live bound PR
+  // head as the run's expected commit and re-verify, so a run stuck on `stale_head`
+  // after a follow-up push can move forward on the actual current head.
+  adoptHead: () => ipcRenderer.invoke(GODMODE_IPC.runAdoptHead) as Promise<AdoptHeadResult>,
   discoverPr: () => ipcRenderer.invoke(GODMODE_IPC.runPrDiscover) as Promise<PrDiscoveryResult>,
   confirmPrCandidate: (input: {
     prNumber: number;
@@ -133,6 +139,14 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: PrDiscoveryEvent) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.runPrDiscovered, listener);
     return () => ipcRenderer.off(GODMODE_IPC.runPrDiscovered, listener);
+  },
+  // Main re-derives verification on its own when it observes the bound PR head drift
+  // (issue #61: GitHub refresh / discovery / builder-exit pass) and pushes the fresh
+  // result so the pane stales immediately, without waiting for a manual re-verify.
+  onVerificationChanged: (callback: (verification: CommitVerification) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: CommitVerification) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.runVerificationChanged, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.runVerificationChanged, listener);
   },
   onGithubChanged: (callback: () => void) => {
     const listener = () => callback();

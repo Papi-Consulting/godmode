@@ -303,6 +303,15 @@ export type GithubPullRequest = {
   isDraft: boolean;
   /** APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none. */
   reviewDecision: string;
+  /**
+   * Remote PR head commit SHA (`headRefOid`), read live from GitHub, or '' when
+   * unavailable. Issue #61: the repo-wide pull list carries this so a GitHub
+   * refresh can reconcile a bound run's PR head *independent of the primary
+   * checkout branch*. That matters for worktree-isolated runs (issue #41), whose
+   * PR branch lives in the run worktree, not the primary checkout — the
+   * current-branch active PR would never observe their bound head.
+   */
+  headSha: string;
 };
 
 export type GithubReview = {
@@ -358,6 +367,10 @@ export type GithubCheck = {
 /** The PR (if any) whose head matches the selected repo's current branch. */
 export type GithubActivePullRequest = GithubPullRequest & {
   url: string;
+  // `headSha` (the remote PR head, used by issue #61 reconciliation) is inherited
+  // from GithubPullRequest so both the active PR and the repo-wide pull list carry
+  // it; the active PR observes the current-branch head, the pull list observes any
+  // bound PR's head regardless of the primary checkout branch.
   reviews: GithubReview[];
   comments: GithubComment[];
   checks: GithubCheck[];
@@ -387,6 +400,12 @@ export type GithubRepo = {
  *   the operator should retry rather than trust a partial result.
  * - `checks_pending`: the commit matched but PR checks are still running.
  * - `checks_failed`: the commit matched but one or more PR checks failed.
+ * - `stale_head`: the expected commit is still present in the PR's commit list
+ *   but it is no longer the PR head — the head moved on (a newer commit was
+ *   pushed) since this commit. Mere presence in PR history does NOT prove the
+ *   current head was reviewed/merge-ready, so this is deliberately distinct from
+ *   `verified` and never clears a review/merge gate. Re-record the new head
+ *   commit and re-verify to clear it (issue #61).
  * - `needs_human`: an ambiguous/blocking condition that needs a person — no
  *   commit could be resolved, or the PR was closed without merging.
  */
@@ -397,6 +416,7 @@ export type CommitVerificationStatus =
   | 'needs_refresh'
   | 'checks_pending'
   | 'checks_failed'
+  | 'stale_head'
   | 'needs_human';
 
 /** Bucketed counts of a PR's normalized checks, for a compact status display. */
@@ -446,6 +466,17 @@ export type CommitVerification = {
   commitInList: boolean;
   /** True when the expected commit equals the remote PR head commit. */
   matchesHead: boolean;
+  /**
+   * True only when this evidence corresponds to the **current PR head** — i.e.
+   * the expected commit equals the remote head (`matchesHead`) or the PR is
+   * confirmed merged (a terminal state where head freshness is moot). Issue #61:
+   * a commit that is merely still present somewhere in the PR commit list
+   * (`commitInList` without `matchesHead`) proves it was pushed, NOT that the
+   * current head was reviewed/merge-ready. Review/merge gates consume this flag,
+   * never bare `commitInList`, so stale evidence for an old head cannot gate
+   * reviewer launch, synthesis, or a `merge_ready` transition.
+   */
+  currentHeadVerified: boolean;
   checks: CommitCheckSummary;
   /** PR merge/close state confirmed from GitHub: OPEN, MERGED, CLOSED, or null. */
   prState: string | null;
@@ -755,6 +786,20 @@ export type RunVerificationLogEntry = {
   prNumber?: number;
   /** PR state confirmed from GitHub (OPEN/MERGED/CLOSED), when a PR was found. */
   prState?: string;
+  /**
+   * Remote PR head SHA this verification was computed against (issue #61), when a
+   * PR was found. Recording the observed head with each result lets a later pass
+   * detect head drift — a newly observed head that differs from the latest
+   * recorded verification's head means the old evidence is stale.
+   */
+  verifiedHeadSha?: string;
+  /**
+   * True when this recorded result corresponds to the current PR head (issue #61):
+   * a mirror of {@link CommitVerification.currentHeadVerified}. A `true` here is
+   * the only verification evidence a merge-ready decision may consume; a result
+   * that was merely `commitInList` for an old head records `false`.
+   */
+  currentHeadVerified?: boolean;
   /** Single-line human summary mirroring {@link CommitVerification.message}. */
   summary: string;
 };
@@ -1053,6 +1098,27 @@ export type RunVerificationResult = {
   verification: CommitVerification;
   run: RunSnapshot | null;
 };
+
+/**
+ * Result of the operator-initiated "adopt current head" recovery (issue #61). When
+ * a follow-up push has moved the bound PR head, the run's recorded expected commit
+ * is stale and every re-verify/reviewer-launch keeps deriving `stale_head`. This
+ * guarded path re-records the live PR head as the run's expected commit and
+ * re-verifies against it, so the run can move forward on the actual current head.
+ * The adoption is refused (and nothing recorded) unless main confirms the live PR
+ * still matches the bound run's PR number/branch, so a closed/replaced PR or a
+ * project switch mid-flight can never silently retarget the run.
+ */
+export type AdoptHeadResult =
+  | { ok: true; run: RunSnapshot; verification: CommitVerification }
+  | {
+      ok: false;
+      code: 'no_run' | 'no_pr_bound' | 'pr_mismatch' | 'not_drifted' | 'invalid_state';
+      error: string;
+      run: RunSnapshot | null;
+      /** The live verification main read while evaluating the request, when available. */
+      verification?: CommitVerification;
+    };
 
 /**
  * Lifecycle of a single tracked reviewer session (issue #10).

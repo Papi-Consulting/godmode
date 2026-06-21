@@ -248,17 +248,23 @@ async function fetchPulls(cwd: string): Promise<Fetched<GithubPullRequest[]>> {
       '--limit',
       String(LIST_LIMIT),
       '--json',
-      'number,title,state,updatedAt,headRefName,isDraft,reviewDecision',
+      // Issue #61: `headRefOid` so the repo-wide pull list carries each PR's live
+      // head SHA. A GitHub refresh can then reconcile a bound run's PR head by
+      // matching `run.prNumber` here, independent of the primary checkout branch —
+      // essential for worktree-isolated runs whose PR branch is not the checkout's.
+      'number,title,state,updatedAt,headRefName,headRefOid,isDraft,reviewDecision',
     ],
     cwd,
   );
   if (!result.ok) return { value: [], failed: true };
-  const value = parseJson<GithubPullRequest[]>(result.stdout, []).map((pr) => ({
+  type RawPull = GithubPullRequest & { headRefOid?: string };
+  const value = parseJson<RawPull[]>(result.stdout, []).map((pr) => ({
     number: pr.number,
     title: pr.title,
     state: pr.state,
     updatedAt: pr.updatedAt,
     headRefName: pr.headRefName,
+    headSha: pr.headRefOid ?? '',
     isDraft: Boolean(pr.isDraft),
     reviewDecision: pr.reviewDecision ?? '',
   }));
@@ -310,7 +316,9 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
   if (branch) args.push(branch);
   args.push(
     '--json',
-    'number,title,state,updatedAt,headRefName,isDraft,reviewDecision,url,reviews,comments,statusCheckRollup',
+    // Issue #61: `headRefOid` so the refresh observes the live PR head and main can
+    // reconcile it against the run's latest recorded verification (stale on drift).
+    'number,title,state,updatedAt,headRefName,headRefOid,isDraft,reviewDecision,url,reviews,comments,statusCheckRollup',
   );
   const result = await runGh(args, cwd);
   if (!result.ok) {
@@ -331,6 +339,7 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
     state: string;
     updatedAt: string;
     headRefName: string;
+    headRefOid?: string;
     isDraft?: boolean;
     reviewDecision?: string;
     url?: string;
@@ -368,6 +377,7 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
       state: raw.state,
       updatedAt: raw.updatedAt,
       headRefName: raw.headRefName,
+      headSha: raw.headRefOid ?? '',
       isDraft: Boolean(raw.isDraft),
       reviewDecision: raw.reviewDecision ?? '',
       url: raw.url ?? '',

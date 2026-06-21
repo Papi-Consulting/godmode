@@ -95,6 +95,9 @@ export function App() {
   const [relaunchingBuilder, setRelaunchingBuilder] = useState(false);
   const [verification, setVerification] = useState<CommitVerification | null>(null);
   const [verifying, setVerifying] = useState(false);
+  // Operator "adopt current head" recovery (issue #61): in-flight flag + last error.
+  const [adoptingHead, setAdoptingHead] = useState(false);
+  const [adoptHeadError, setAdoptHeadError] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<PrDiscoveryResult | null>(null);
   const [discoveryHint, setDiscoveryHint] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
@@ -322,6 +325,25 @@ export function App() {
     }
   }, []);
 
+  // Adopt the live bound PR head as the run's expected commit (issue #61 recovery).
+  // Used when verification is `stale_head` after a follow-up push: main confirms the
+  // live PR still matches the bound run, re-records the new head, and re-verifies, so
+  // the run can move forward on the actual current head instead of looping stale.
+  const adoptHead = useCallback(async () => {
+    if (!window.godmode?.adoptHead) return;
+    setAdoptingHead(true);
+    const seq = (runRequestSeq.current += 1);
+    try {
+      const result = await window.godmode.adoptHead();
+      if (seq !== runRequestSeq.current) return;
+      if (result.run) setRun(result.run);
+      if (result.verification) setVerification(result.verification);
+      setAdoptHeadError(result.ok ? null : result.error);
+    } finally {
+      setAdoptingHead(false);
+    }
+  }, []);
+
   // Run a read-only "Check for PR" discovery pass for a builder_running run
   // (issue #38). Main lists open PRs scoped to the operated project and classifies
   // candidates by issue link / recent-unlinked fallback; the result is non-fatal
@@ -536,6 +558,15 @@ export function App() {
       setDiscovery(payload.discovery);
       setDiscoveryHint(payload.hint ?? null);
     });
+    // Main re-derives verification on its own when it observes the bound PR head
+    // drift (issue #61: GitHub refresh / discovery / builder-exit pass) and pushes
+    // the fresh result. Treat it as authoritative so the pane stales (to
+    // `stale_head`) immediately, without waiting for a manual re-verify; bump the
+    // seq so an older in-flight verify fetch can't overwrite this newer evidence.
+    const offVerification = window.godmode?.onVerificationChanged((next) => {
+      runRequestSeq.current += 1;
+      setVerification(next ?? null);
+    });
     // Main pushes the loop-controller state on every loop change (mode toggle,
     // waiting-on change, halt). Treat it as authoritative (issue #39).
     const offLoop = window.godmode?.onLoopChanged((next) => {
@@ -551,6 +582,7 @@ export function App() {
       offRun?.();
       offLoop?.();
       offPrDiscovered?.();
+      offVerification?.();
       offResume?.();
       offBuilderRecovery?.();
     };
@@ -761,6 +793,9 @@ export function App() {
                 loading={verifying}
                 hasRun={run !== null}
                 onVerify={verifyCommit}
+                onAdoptHead={adoptHead}
+                adopting={adoptingHead}
+                adoptError={adoptHeadError}
               />
               <ReviewLaunchPane
                 run={run}

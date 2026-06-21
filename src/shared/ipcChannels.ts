@@ -22,6 +22,11 @@ export const GODMODE_IPC = {
   runHandoffGet: 'godmode:run:handoff:get',
   runHandoffSend: 'godmode:run:handoff:send',
   runVerify: 'godmode:run:verify',
+  // Issue #61: main re-derives verification on its own (observed bound-PR head
+  // drift) and pushes the fresh result so the pane stales without a manual click;
+  // `runAdoptHead` is the guarded operator recovery that re-records the live head.
+  runVerificationChanged: 'godmode:run:verification:changed',
+  runAdoptHead: 'godmode:run:head:adopt',
   runPrDiscover: 'godmode:run:pr:discover',
   runPrConfirm: 'godmode:run:pr:confirm',
   runPrDiscovered: 'godmode:run:pr:discovered',
