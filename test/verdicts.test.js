@@ -154,6 +154,35 @@ test('an approved verdict that declares blocking>0 is malformed → ambiguous', 
   assert.match(outcomes[0].reason, /declares blocking=2/);
 });
 
+test('a current-head verdict with a non-integer pr= (e.g. pr=42x) is malformed → ambiguous (A-1)', () => {
+  // Regression for PR #68 A-1: Number.parseInt('42x', 10) === 42 would have made
+  // a suffixed pr= token silently match the bound PR and approve. A strict
+  // integer check must route it to ambiguous, never a silent pass.
+  const { outcomes, ignored } = parse([verdictComment('reviewer_a', { pr: '42x' })]);
+  assert.equal(ignored.length, 0, 'a non-integer pr= is not silently dropped as wrong-PR');
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'ambiguous');
+  assert.match(outcomes[0].reason, /missing\/invalid pr=/);
+});
+
+test('a current-head verdict with a non-integer blocking= (e.g. blocking=0x) is malformed → ambiguous (A-1)', () => {
+  // Regression for PR #68 A-1: Number.parseInt('0x', 10) === 0 would have made a
+  // suffixed blocking= token read as an approved/blocking=0 pass.
+  const { outcomes } = parse([verdictComment('reviewer_a', { status: 'approved', blocking: '0x' })]);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'ambiguous');
+  assert.match(outcomes[0].reason, /missing\/invalid blocking=/);
+});
+
+test('a still-valid integer pr= naming a different PR is ignored as wrong-PR (not ambiguous)', () => {
+  // Guards that the A-1 strict-integer change did not turn a legitimately
+  // mismatched (but well-formed) pr= into ambiguous evidence.
+  const { outcomes, ignored } = parse([verdictComment('reviewer_a', { pr: 7 })]);
+  assert.equal(outcomes.length, 0);
+  assert.equal(ignored.length, 1);
+  assert.match(ignored[0].reason, /wrong-PR/);
+});
+
 test('an approved blocking=0 verdict that embeds BLOCKING blocks is contradictory → ambiguous (B-1)', () => {
   // Regression for PR #68 B-1: the marker declares approved/blocking=0 but the
   // body lists a BLOCKING block. This contradiction must route to ambiguous,
@@ -196,6 +225,35 @@ test('agreeing duplicate verdicts collapse to one accepted verdict', () => {
   assert.equal(outcomes.length, 1);
   assert.equal(outcomes[0].kind, 'verdict');
   assert.equal(outcomes[0].verdict.status, 'approved');
+});
+
+test('two blocked verdicts with the same count but different BLOCKING blocks route to ambiguous (B-2)', () => {
+  // Regression for PR #68 B-2: collapsing duplicates only on status+count would
+  // treat these agreeing and return the first verdict, silently dropping the
+  // second reviewer's distinct blocker from the fix-cycle handoff. The full
+  // normalized payload (blocker markers/files/details/fixes) must agree to collapse.
+  const { outcomes } = parse([
+    verdictComment('reviewer_a', { status: 'blocked', blocking: 1, blocks: blockingBlock('A-1') }),
+    verdictComment('reviewer_a', { status: 'blocked', blocking: 1, blocks: blockingBlock('A-2') }),
+  ]);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'ambiguous');
+  assert.match(outcomes[0].reason, /duplicate-conflicting/);
+});
+
+test('two blocked verdicts with identical BLOCKING content collapse to one accepted verdict (B-2 guard)', () => {
+  // The B-2 fix must not over-fire: genuinely identical blocked duplicates still
+  // collapse, preserving the single normalized blocker for the fix cycle.
+  const blocks = blockingBlock('A-1');
+  const { outcomes } = parse([
+    verdictComment('reviewer_a', { status: 'blocked', blocking: 1, blocks }),
+    verdictComment('reviewer_a', { status: 'blocked', blocking: 1, blocks }),
+  ]);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'verdict');
+  assert.equal(outcomes[0].verdict.status, 'blocked');
+  assert.equal(outcomes[0].verdict.findings.length, 1);
+  assert.equal(outcomes[0].verdict.findings[0].marker, 'A-1');
 });
 
 test('no current head (no verified PR) produces no fallback evidence at all', () => {

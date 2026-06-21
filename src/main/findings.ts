@@ -547,6 +547,19 @@ function verdictField(line: string, key: string): string | undefined {
   return match ? match[1].trim() : undefined;
 }
 
+/**
+ * Parse a verdict token that must be a base-10 non-negative integer with **no**
+ * trailing/leading junk (e.g. `pr=`/`blocking=`). Returns undefined for missing
+ * or malformed tokens such as `42x` or `0x`, so the caller routes them to
+ * ambiguous rather than letting `Number.parseInt`'s prefix-parsing (`42x` → 42,
+ * `0x` → 0) silently accept them (issue #60 blocker A-1).
+ */
+function strictNonNegativeInt(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
 /** Whether two SHAs refer to the same commit, tolerating short (≥7) vs full. */
 function shaMatches(written: string | undefined, current: string | null): boolean {
   if (!written || !current) return false;
@@ -578,6 +591,25 @@ function attributeReviewer(
   const byId = reviewerField ? reviewers.find((r) => r.reviewerId === reviewerField) : undefined;
   if (byPane && byId) return byPane.paneId === byId.paneId ? byPane : null;
   return byPane ?? byId ?? null;
+}
+
+/**
+ * A stable, content-addressable signature of a fallback verdict's *meaningful*
+ * payload: its status, declared blocking count, and the full set of normalized
+ * blocker findings (marker/file/line/title/details/fix), order-independent. Two
+ * current-head verdict comments for the same reviewer collapse as agreeing
+ * duplicates only when their signatures match — so two `blocked blocking=1`
+ * comments carrying *different* BLOCKING blocks no longer silently drop one
+ * blocker but route to ambiguous (issue #60 blocker B-2).
+ */
+function verdictSignature(verdict: ReviewerFallbackVerdict): string {
+  const findings = verdict.findings
+    .map((f) =>
+      [f.marker ?? '', f.file ?? '', f.line ?? '', f.title, f.details ?? '', f.suggestedFix ?? ''].join('\u0001'),
+    )
+    .sort()
+    .join('\u0002');
+  return [verdict.status, verdict.declaredBlocking, findings].join('\u0003');
 }
 
 /** Canonicalize a `status=` token, or undefined when it is not a known verdict. */
@@ -615,17 +647,19 @@ type PaneAccumulator = {
  *
  *  - it must be attributable to a configured reviewer (`pane=`/`reviewer=`); else
  *    it is ignored as unknown/unrelated;
- *  - a `pr=` that names a different PR → ignored (wrong-PR);
+ *  - a `pr=` that is a valid integer naming a different PR → ignored (wrong-PR);
  *  - a `head=` that is a real SHA not matching the current head → ignored
  *    (stale-head);
  *  - otherwise it is attributed to the pane and validated. A current-head verdict
- *    that is malformed (missing/!numeric fields, unknown status, `approved` with
+ *    that is malformed (missing fields, a `pr=`/`blocking=` that is not a strict
+ *    base-10 integer — e.g. `42x`/`0x`, unknown status, `approved` with
  *    `blocking>0`, `approved` that nonetheless embeds `BLOCKING` blocks, or
  *    `blocked` with no `BLOCKING` blocks) routes that pane to **ambiguous**,
  *    never a silent pass;
- *  - a pane with two or more current-head verdicts that disagree on status/count
- *    routes to **ambiguous** (duplicate-conflicting); agreeing duplicates collapse
- *    to one accepted verdict.
+ *  - a pane with two or more current-head verdicts whose full normalized payload
+ *    disagrees (status, declared count, **or** blocker markers/files/details/fixes)
+ *    routes to **ambiguous** (duplicate-conflicting); only fully-agreeing
+ *    duplicates collapse to one accepted verdict.
  *
  * When `currentHeadSha` is null (no verified PR head) there is no current head to
  * tie a verdict to, so no fallback evidence is produced at all.
@@ -661,8 +695,8 @@ export function parseReviewerVerdictComments(input: ParseVerdictCommentsInput): 
     }
 
     const prField = verdictField(markerLine, 'pr');
-    const prValue = prField !== undefined ? Number.parseInt(prField, 10) : NaN;
-    if (prField !== undefined && Number.isFinite(prValue) && prValue !== prNumber) {
+    const prValue = strictNonNegativeInt(prField);
+    if (prValue !== undefined && prValue !== prNumber) {
       ignored.push({ reason: `wrong-PR: verdict targets PR #${prValue}, not #${prNumber}`, author });
       continue;
     }
@@ -679,15 +713,15 @@ export function parseReviewerVerdictComments(input: ParseVerdictCommentsInput): 
     const statusField = verdictField(markerLine, 'status');
     const status = canonicalVerdictStatus(statusField);
     const blockingField = verdictField(markerLine, 'blocking');
-    const blockingValue = blockingField !== undefined ? Number.parseInt(blockingField, 10) : NaN;
+    const blockingValue = strictNonNegativeInt(blockingField);
 
     const problems: string[] = [];
-    if (prField === undefined || !Number.isFinite(prValue)) problems.push('missing/invalid pr=');
+    if (prField === undefined || prValue === undefined) problems.push('missing/invalid pr=');
     if (!looksLikeSha(headField)) problems.push('missing/invalid head=');
     if (!status) problems.push(`unknown status=${statusField ?? '(none)'}`);
-    if (blockingField === undefined || !Number.isFinite(blockingValue)) problems.push('missing/invalid blocking=');
+    if (blockingField === undefined || blockingValue === undefined) problems.push('missing/invalid blocking=');
 
-    if (problems.length > 0 || !status) {
+    if (problems.length > 0 || status === undefined || prValue === undefined || blockingValue === undefined) {
       acc.malformed.push(`malformed verdict from ${author}: ${problems.join(', ')}`);
       continue;
     }
@@ -757,16 +791,17 @@ export function parseReviewerVerdictComments(input: ParseVerdictCommentsInput): 
       continue;
     }
     const first = valid[0];
-    const allAgree = valid.every(
-      (v) => v.status === first.status && v.declaredBlocking === first.declaredBlocking,
-    );
+    const firstSignature = verdictSignature(first);
+    const allAgree = valid.every((v) => verdictSignature(v) === firstSignature);
     if (allAgree) {
       outcomes.push({ ...base, kind: 'verdict', verdict: first });
     } else {
       outcomes.push({
         ...base,
         kind: 'ambiguous',
-        reason: `duplicate-conflicting verdicts (${valid.map((v) => v.status).join(' vs ')})`,
+        reason: `duplicate-conflicting verdicts: ${valid.length} current-head verdicts disagree (${valid
+          .map((v) => `${v.status}/${v.declaredBlocking}+${v.findings.length}b`)
+          .join(' vs ')})`,
       });
     }
   }
