@@ -6,8 +6,10 @@ import type {
   MergeRecommendation,
   ReviewerFinding,
   ReviewerGateState,
+  ReviewerHeadEvidence,
   ReviewerResult,
   ReviewerResultStatus,
+  ReviewerSessionState,
 } from '../shared/types.js';
 
 /**
@@ -287,12 +289,90 @@ function gateFor(paneId: AgentRole, result: ReviewerResult | undefined): Reviewe
   return { reviewerId: result.reviewerId, paneId, status: result.status, cleared, acceptedBlockers: acceptedCount };
 }
 
+/**
+ * Reviewer session statuses that represent a completed, parseable attempt — the
+ * captured output exists and the session reached a terminal state synthesis can
+ * consume. A still-`running`/`launching` or `failed` attempt is not completed
+ * evidence (issue #59).
+ */
+const COMPLETED_REVIEWER_STATUSES: ReadonlySet<ReviewerSessionState['status']> = new Set([
+  'completed',
+  'comment_posted',
+]);
+
+/** The minimal reviewer-session shape {@link reviewerHeadEvidence} needs. */
+export type ReviewerHeadEvidenceInput = Pick<
+  ReviewerSessionState,
+  'reviewerId' | 'paneId' | 'status'
+> &
+  Partial<Pick<ReviewerSessionState, 'attemptId' | 'cycle' | 'targetHeadSha' | 'targetHeadShaShort'>>;
+
+/**
+ * Build the current-head evidence for one reviewer session (issue #59): whether
+ * its latest attempt targeted the current verified PR head AND reached a
+ * completed/parseable state. Used by synthesis to decide which reviewer results
+ * the merge gate may consume, and surfaced to the UI so a stale attempt is labeled
+ * rather than read as current approval. Pure.
+ */
+export function reviewerHeadEvidence(
+  session: ReviewerHeadEvidenceInput,
+  currentHeadSha: string | null,
+): ReviewerHeadEvidence {
+  const completed = COMPLETED_REVIEWER_STATUSES.has(session.status);
+  const current = Boolean(currentHeadSha) && session.targetHeadSha === currentHeadSha;
+  return {
+    reviewerId: session.reviewerId,
+    paneId: session.paneId,
+    attemptId: session.attemptId,
+    cycle: session.cycle,
+    attemptHeadSha: session.targetHeadSha,
+    attemptHeadShaShort: session.targetHeadShaShort,
+    current,
+    completed,
+  };
+}
+
+/** Panes whose reviewer has completed, current-head evidence the gate may consume. */
+function usablePanes(reviewerHeads: ReviewerHeadEvidence[]): Set<AgentRole> {
+  return new Set(reviewerHeads.filter((head) => head.current && head.completed).map((head) => head.paneId));
+}
+
+/**
+ * Filter reviewer results to those backed by completed, current-head evidence
+ * (issue #59). A reviewer whose latest attempt targeted a previous PR head, or has
+ * not completed, is dropped — its output is **not** consumed as current evidence,
+ * so neither its clear nor its blockers feed the merge decision for the new head.
+ */
+export function currentHeadResults(
+  results: ReviewerResult[],
+  reviewerHeads: ReviewerHeadEvidence[],
+): ReviewerResult[] {
+  const panes = usablePanes(reviewerHeads);
+  return results.filter((result) => panes.has(result.paneId));
+}
+
 /** Inputs for {@link computeMergeReadiness}. */
 export type MergeReadinessInput = {
   results: ReviewerResult[];
   /** The latest #9 commit verification used as the evidence gate, or null. */
   verification: CommitVerification | null;
+  /**
+   * Per-reviewer current-head evidence (issue #59). When provided, the gate only
+   * consumes reviewer results whose attempt targeted the current PR head and
+   * completed — a stale or incomplete reviewer is treated as having no usable
+   * result, so the gate can never reach `merge_ready` on stale evidence and the
+   * reasons explain which reviewer/head is missing. Omitted → legacy behavior
+   * (every result is consumed), preserving the pre-#59 callers/tests.
+   */
+  reviewerHeads?: ReviewerHeadEvidence[];
+  /** Short SHA of the PR head the gate is computed against, for the reasons text. */
+  currentHeadShaShort?: string | null;
 };
+
+/** Human label for a reviewer pane in gate reasons. */
+function reviewerLabel(paneId: AgentRole): string {
+  return paneId === 'reviewer_a' ? 'Reviewer A' : 'Reviewer B';
+}
 
 /**
  * Compute the merge-readiness gate (issue #11). Merge-ready requires BOTH
@@ -304,17 +384,52 @@ export type MergeReadinessInput = {
  * non-reviewer gate, e.g. an unverified PR, is unmet but nothing can auto-fix).
  */
 export function computeMergeReadiness(input: MergeReadinessInput): MergeReadiness {
-  const { results, verification } = input;
-  const reviewerA = gateFor('reviewer_a', results.find((r) => r.paneId === 'reviewer_a'));
-  const reviewerB = gateFor('reviewer_b', results.find((r) => r.paneId === 'reviewer_b'));
+  const { results, verification, reviewerHeads, currentHeadShaShort } = input;
+
+  // Head-gating (issue #59): when per-reviewer head evidence is supplied, the gate
+  // consumes ONLY reviewer results whose attempt targeted the current PR head and
+  // completed. A stale/incomplete reviewer is dropped from `usable`, so its gate is
+  // null (not cleared) and its blockers/ambiguity never feed the decision — the
+  // merge gate can never reach `merge_ready` on evidence from a previous head.
+  const headGating = reviewerHeads !== undefined;
+  const headByPane = new Map<AgentRole, ReviewerHeadEvidence>(
+    (reviewerHeads ?? []).map((head) => [head.paneId, head]),
+  );
+  const usable = headGating ? currentHeadResults(results, reviewerHeads) : results;
+
+  const reviewerA = gateFor('reviewer_a', usable.find((r) => r.paneId === 'reviewer_a'));
+  const reviewerB = gateFor('reviewer_b', usable.find((r) => r.paneId === 'reviewer_b'));
 
   const prVerified = verification?.status === 'verified';
-  const totalAcceptedBlockers = acceptedBlockers(results).length;
+  const totalAcceptedBlockers = acceptedBlockers(usable).length;
   const noAcceptedBlockers = totalAcceptedBlockers === 0;
-  const anyAmbiguous = results.some((r) => r.status === 'ambiguous');
+  const anyAmbiguous = usable.some((r) => r.status === 'ambiguous');
+  // A reviewer that ran but whose attempt is stale/incomplete for the current head
+  // blocks merge-readiness and routes to `hold` (relaunch reviewers), not a human.
+  const anyStaleHead = headGating && (reviewerHeads ?? []).some((head) => !(head.current && head.completed));
 
   const reasons: string[] = [];
-  const describeReviewer = (label: string, gate: ReviewerGateState | null) => {
+  const currentShort = currentHeadShaShort ?? null;
+  const describeReviewer = (paneId: AgentRole, gate: ReviewerGateState | null) => {
+    const label = reviewerLabel(paneId);
+    // Head-specific reasons take precedence: a reviewer with a stale/incomplete
+    // attempt for the current head is NOT "no parseable result" — it reviewed a
+    // different (or not-yet-finished) head, so say exactly that.
+    const head = headGating ? headByPane.get(paneId) : undefined;
+    if (head && !(head.current && head.completed)) {
+      if (head.attemptHeadShaShort && !head.current) {
+        reasons.push(
+          `${label} last reviewed ${head.attemptHeadShaShort}, but the current PR head is ` +
+            `${currentShort ?? 'unknown'}; its review is stale — relaunch reviewers for a fresh review.`,
+        );
+      } else {
+        reasons.push(
+          `${label} has not produced a completed review for the current PR head` +
+            `${currentShort ? ` ${currentShort}` : ''} yet.`,
+        );
+      }
+      return;
+    }
     if (!gate) {
       reasons.push(`${label} has not produced a parseable result yet.`);
       return;
@@ -323,8 +438,8 @@ export function computeMergeReadiness(input: MergeReadinessInput): MergeReadines
     else if (gate.acceptedBlockers > 0)
       reasons.push(`${label} has ${gate.acceptedBlockers} accepted blocking finding(s).`);
   };
-  describeReviewer('Reviewer A', reviewerA);
-  describeReviewer('Reviewer B', reviewerB);
+  describeReviewer('reviewer_a', reviewerA);
+  describeReviewer('reviewer_b', reviewerB);
 
   if (!prVerified) {
     reasons.push(
@@ -339,7 +454,10 @@ export function computeMergeReadiness(input: MergeReadinessInput): MergeReadines
     Boolean(reviewerB?.cleared) &&
     prVerified &&
     noAcceptedBlockers &&
-    !anyAmbiguous;
+    !anyAmbiguous &&
+    // A stale/incomplete reviewer attempt for the current head can never clear the
+    // gate, even if both usable gates happen to read cleared (issue #59).
+    !anyStaleHead;
 
   let recommendation: MergeRecommendation;
   if (anyAmbiguous) recommendation = 'needs_human';
@@ -367,6 +485,8 @@ export function computeMergeReadiness(input: MergeReadinessInput): MergeReadines
     anyAmbiguous,
     recommendation,
     reasons,
+    prHeadShaShort: currentShort,
+    reviewerHeads,
   };
 }
 

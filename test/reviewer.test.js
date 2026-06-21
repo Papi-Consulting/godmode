@@ -17,6 +17,9 @@ import {
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
+  reviewerAttemptFingerprint,
+  reviewerAttemptId,
+  reviewerAttemptsReplaced,
   reviewerCommentBody,
   reviewerLaunchArgs,
   reviewerLaunchTransition,
@@ -365,4 +368,84 @@ test('isLoopReviewSynthesisPreempted: a generation bump preempts synthesis insid
   // The status guard still preempts a stop transition with no generation bump.
   assert.equal(isLoopReviewSynthesisPreempted('paused', false), true);
   assert.equal(isLoopReviewSynthesisPreempted(null, false), true);
+});
+
+// --- Reviewer attempt identity (issue #59) -----------------------------------
+
+test('reviewerAttemptId composes <cycle>-<shortSha>-<reviewerId>-<timestamp>', () => {
+  const id = reviewerAttemptId({
+    cycle: 2,
+    headShaShort: 'abc1234',
+    reviewerId: 'reviewer-a',
+    launchedAt: '2026-06-20T10:11:12.000Z',
+  });
+  assert.equal(id, '2-abc1234-reviewer-a-20260620101112000');
+});
+
+test('reviewerAttemptId is distinct across same-head relaunches (timestamp varies)', () => {
+  const base = { cycle: 1, headShaShort: 'deadbee', reviewerId: 'reviewer-b' };
+  const first = reviewerAttemptId({ ...base, launchedAt: '2026-06-20T10:00:00.000Z' });
+  const second = reviewerAttemptId({ ...base, launchedAt: '2026-06-20T10:05:00.000Z' });
+  assert.notEqual(first, second, 'a relaunch for the same cycle+head is still a distinct attempt');
+});
+
+test('reviewerAttemptId sanitizes unsafe characters so it is filename-safe', () => {
+  const id = reviewerAttemptId({
+    cycle: 1,
+    headShaShort: 'ab/cd',
+    reviewerId: '../evil',
+    launchedAt: '2026-06-20T00:00:00.000Z',
+  });
+  assert.ok(!id.includes('/'), 'no path separators');
+  assert.ok(!id.includes('..'), 'no parent-dir segments');
+  assert.match(id, /^[A-Za-z0-9_-]+$/);
+});
+
+// --- Reviewer-attempt fingerprint / relaunch detection (issue #59, A-2) -------
+// Synthesis re-runs the live #9 gate across an `await`; a concurrent operator
+// reviewer relaunch can replace `run.reviewers` during that window while keeping
+// the run in `reviewers_running` (an idempotent relaunch), so neither the status
+// guard nor the loop-generation guard catches it. Comparing attempt fingerprints
+// across the await is what aborts the stale synthesis (blocker A-2).
+
+test('reviewerAttemptFingerprint is order-independent and ignores non-attempt fields', () => {
+  const a = { paneId: 'reviewer_a', attemptId: '1-aaa-reviewer-a-t1', status: 'running' };
+  const b = { paneId: 'reviewer_b', attemptId: '1-aaa-reviewer-b-t1', status: 'completed' };
+  // Same attempts in any order produce the same fingerprint.
+  assert.equal(reviewerAttemptFingerprint([a, b]), reviewerAttemptFingerprint([b, a]));
+  // A status change (not an attempt change) does not move the fingerprint.
+  assert.equal(
+    reviewerAttemptFingerprint([a, b]),
+    reviewerAttemptFingerprint([{ ...a, status: 'completed' }, { ...b, status: 'failed' }]),
+  );
+  // No reviewers → empty fingerprint.
+  assert.equal(reviewerAttemptFingerprint([]), '');
+  assert.equal(reviewerAttemptFingerprint(undefined), '');
+});
+
+test('reviewerAttemptsReplaced: a concurrent relaunch (new attemptIds) is detected', () => {
+  const before = [
+    { paneId: 'reviewer_a', attemptId: '1-aaa-reviewer-a-t1' },
+    { paneId: 'reviewer_b', attemptId: '1-aaa-reviewer-b-t1' },
+  ];
+  const captured = reviewerAttemptFingerprint(before);
+  // No relaunch: same attempts (status may have advanced) → not replaced.
+  assert.equal(
+    reviewerAttemptsReplaced(captured, [
+      { ...before[0], status: 'completed' },
+      { ...before[1], status: 'completed' },
+    ]),
+    false,
+  );
+  // A relaunch mints fresh attemptIds for the same panes → replaced.
+  assert.equal(
+    reviewerAttemptsReplaced(captured, [
+      { paneId: 'reviewer_a', attemptId: '2-bbb-reviewer-a-t2' },
+      { paneId: 'reviewer_b', attemptId: '2-bbb-reviewer-b-t2' },
+    ]),
+    true,
+  );
+  // The sessions were cleared/replaced entirely → replaced.
+  assert.equal(reviewerAttemptsReplaced(captured, undefined), true);
+  assert.equal(reviewerAttemptsReplaced(captured, []), true);
 });

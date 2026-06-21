@@ -8,10 +8,14 @@ import path from 'node:path';
 import { test } from 'node:test';
 import {
   appendArtifact,
+  ensureReviewerArtifactDir,
   ensureRunArtifactDir,
+  readArtifactByRelPath,
   readReviewerArtifact,
   reviewerArtifactPath,
   reviewerArtifactRelPath,
+  reviewerAttemptArtifactPath,
+  reviewerAttemptArtifactRelPath,
   runArtifactRelDir,
   runFindingsPath,
   runFindingsRelPath,
@@ -79,6 +83,56 @@ test('appendArtifact reports failure (not a throw) when the target dir is missin
   });
   assert.equal(ok, false);
   assert.ok(!fs.existsSync(file));
+});
+
+// --- Attempt-specific reviewer artifacts (issue #59) -------------------------
+
+test('reviewerAttemptArtifactRelPath is an attempt-specific path in the reviewers/ subdir', () => {
+  assert.equal(
+    reviewerAttemptArtifactRelPath('run-59', 'reviewer-a', '2-abc1234-reviewer-a-99'),
+    '.godmode/runs/run-59/reviewers/reviewer-a-2-abc1234-reviewer-a-99.log',
+  );
+});
+
+test('two attempts for the same reviewer never collide on one artifact path', () => {
+  // The core #59 guarantee: a post-fix relaunch (a new attempt id) writes a new
+  // file rather than overwriting the prior attempt's captured evidence.
+  const first = reviewerAttemptArtifactRelPath('run-59', 'reviewer-a', '1-aaaaaaa-reviewer-a-1');
+  const second = reviewerAttemptArtifactRelPath('run-59', 'reviewer-a', '2-bbbbbbb-reviewer-a-2');
+  assert.notEqual(first, second);
+});
+
+test('a crafted attempt id cannot escape the run dir', () => {
+  const root = tempRoot();
+  const escaped = reviewerAttemptArtifactPath(root, 'run-59', 'reviewer-a', '../../evil');
+  const runDir = path.resolve(root, '.godmode', 'runs', 'run-59');
+  assert.ok(escaped.startsWith(runDir + path.sep), `${escaped} must stay under ${runDir}`);
+});
+
+test('ensureReviewerArtifactDir creates the per-run reviewers/ subdir', () => {
+  const root = tempRoot();
+  const dir = ensureReviewerArtifactDir(root, 'run-59');
+  assert.equal(dir, path.resolve(root, '.godmode', 'runs', 'run-59', 'reviewers'));
+  assert.ok(fs.statSync(dir).isDirectory());
+});
+
+test('readArtifactByRelPath reads an attempt artifact by its recorded path', () => {
+  const root = tempRoot();
+  ensureReviewerArtifactDir(root, 'run-59');
+  const rel = reviewerAttemptArtifactRelPath('run-59', 'reviewer-a', 'attempt-1');
+  appendArtifact(reviewerAttemptArtifactPath(root, 'run-59', 'reviewer-a', 'attempt-1'), 'STATUS=fresh\n');
+  assert.match(readArtifactByRelPath(root, rel), /STATUS=fresh/);
+  // An absent attempt artifact reads as null (parses to an ambiguous result).
+  assert.equal(readArtifactByRelPath(root, reviewerAttemptArtifactRelPath('run-59', 'reviewer-b', 'attempt-1')), null);
+});
+
+test('readArtifactByRelPath refuses a relative path escaping the run-artifact dir', () => {
+  const root = tempRoot();
+  // Even if such a file exists on disk, a path that climbs out of .godmode/runs/
+  // must not be readable through the recorded-path reader.
+  fs.writeFileSync(path.join(root, 'secret.txt'), 'top secret');
+  assert.equal(readArtifactByRelPath(root, '../secret.txt'), null);
+  assert.equal(readArtifactByRelPath(root, 'secret.txt'), null);
 });
 
 // --- Findings persistence (issue #11) ----------------------------------------

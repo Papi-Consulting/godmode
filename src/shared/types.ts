@@ -1085,6 +1085,31 @@ export type ReviewerSessionState = {
   /** PTY pane/role the reviewer runs in. */
   paneId: AgentRole;
   /**
+   * First-class attempt identity for this reviewer launch (issue #59):
+   * `<cycle>-<shortSha>-<reviewerId>-<timestamp>`. Distinct for every launch and
+   * relaunch (a post-fix relaunch against a new PR head is a *new* attempt), so
+   * each attempt's artifact, audit record, and freshness can be told apart. The
+   * artifact path embeds this id, so a relaunch never overwrites a prior attempt.
+   */
+  attemptId: string;
+  /** Fix-loop cycle this attempt was launched in (1-based). */
+  cycle: number;
+  /** PR number the attempt reviews. */
+  prNumber: number;
+  /** PR head branch the attempt reviews, when resolvable. */
+  branch?: string;
+  /**
+   * Full remote PR head commit SHA this attempt targets — the evidence that ties
+   * the attempt to the exact code it reviewed. Synthesis only consumes a reviewer
+   * attempt whose `targetHeadSha` equals the current verified PR head, so a stale
+   * attempt from a previous head can never clear the merge gate (issue #59).
+   */
+  targetHeadSha: string;
+  /** 7-char form of {@link targetHeadSha} for compact display. */
+  targetHeadShaShort: string;
+  /** ISO timestamp this attempt was launched. */
+  launchedAt: string;
+  /**
    * Opaque per-launch identity, regenerated every time reviewers are launched
    * (including an idempotent same-run relaunch). An async marker post captures
    * this before its `gh` call and re-confirms it after; if a relaunch replaced
@@ -1342,6 +1367,44 @@ export type MergeReadiness = {
   recommendation: MergeRecommendation;
   /** Human-readable, ordered list of why merge is (not) ready. */
   reasons: string[];
+  /**
+   * Short SHA of the PR head this gate was computed against (issue #59), when a
+   * verified PR head was resolvable. Reviewer evidence from a different head is
+   * not consumed, so this is the head the cleared/blocking decision applies to.
+   */
+  prHeadShaShort?: string | null;
+  /**
+   * Per-reviewer current-head evidence (issue #59): whether each reviewer's latest
+   * attempt targeted this gate's PR head and reached a completed/parseable state.
+   * A reviewer without current-head evidence is not consumed by the gate, so it can
+   * never reach `merge_ready` on a stale review; the UI labels such attempts stale.
+   */
+  reviewerHeads?: ReviewerHeadEvidence[];
+};
+
+/**
+ * Whether one reviewer's latest attempt is evidence for the *current* PR head
+ * (issue #59). Synthesis builds one per tracked reviewer session, and the merge
+ * gate consumes a reviewer's parsed result only when its attempt both targeted the
+ * current head and reached a completed/parseable terminal state. A stale attempt
+ * (an older head) or an incomplete one is surfaced so the operator relaunches
+ * reviewers rather than the gate silently treating old output as current approval.
+ */
+export type ReviewerHeadEvidence = {
+  reviewerId: string;
+  paneId: AgentRole;
+  /** The attempt id of the reviewer's latest tracked session, when present. */
+  attemptId?: string;
+  /** Fix-loop cycle of the latest attempt. */
+  cycle?: number;
+  /** Full head SHA the latest attempt targeted, when recorded. */
+  attemptHeadSha?: string;
+  /** 7-char form of {@link attemptHeadSha} for compact display. */
+  attemptHeadShaShort?: string;
+  /** True when the attempt targeted the current verified PR head SHA. */
+  current: boolean;
+  /** True when the attempt reached a completed/comment-posted (parseable) state. */
+  completed: boolean;
 };
 
 /**
@@ -1362,6 +1425,21 @@ export type RunFindings = {
    * the fix handoff can be (re)composed without another `gh` round-trip.
    */
   prUrl?: string;
+  /**
+   * Full remote PR head commit SHA this synthesis was computed against (issue #59).
+   * The gate consumes only reviewer attempts targeting this head; recording it
+   * proves which commit the merge decision applies to, and lets the UI label any
+   * reviewer attempt from a different head as stale.
+   */
+  prHeadSha?: string;
+  /** 7-char form of {@link prHeadSha} for compact display. */
+  prHeadShaShort?: string;
+  /**
+   * Per-reviewer current-head evidence used by this synthesis (issue #59), one per
+   * tracked reviewer session, so the operator can see which reviewer/attempt/head
+   * the gate consumed and which were ignored as stale.
+   */
+  reviewerHeads?: ReviewerHeadEvidence[];
   /** ISO timestamp the synthesis was produced (main owns the clock). */
   fetchedAt: string;
 };
