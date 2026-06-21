@@ -39,9 +39,35 @@ function reviewerTone(status: ReviewerResultStatus): string {
 }
 
 /**
+ * A chip labeling *how* a reviewer's current-head evidence was obtained (issue
+ * #60). A clear via a role-signed fallback PR comment is harness evidence, not a
+ * formal GitHub approval, so it is labeled distinctly rather than read as a native
+ * GitHub review. The plain `artifact` source needs no chip (the pre-#60 default).
+ */
+function sourceChip(head: ReviewerHeadEvidence | undefined) {
+  if (head?.source === 'fallback_comment') {
+    return (
+      <span className="header-chip" title="Cleared via a role-signed verdict PR comment — harness evidence, not a formal GitHub approval.">
+        role-signed comment
+      </span>
+    );
+  }
+  if (head?.source === 'reconciled') {
+    return (
+      <span className="header-chip" title="Captured artifact and a role-signed verdict comment agreed for the current head.">
+        artifact + comment
+      </span>
+    );
+  }
+  return null;
+}
+
+/**
  * One reviewer's merge-gate row. With issue #59 the row also surfaces the attempt
  * head the reviewer evaluated and labels it **stale** when that attempt did not
- * target the current PR head — so an old attempt is never read as current.
+ * target the current PR head — so an old attempt is never read as current. Issue
+ * #60 adds a source chip when the evidence came from a role-signed fallback PR
+ * comment rather than a captured artifact / formal GitHub review.
  */
 function gateRow(label: string, gate: ReviewerGateState | null, head: ReviewerHeadEvidence | undefined) {
   const stale = head !== undefined && !(head.current && head.completed);
@@ -58,6 +84,7 @@ function gateRow(label: string, gate: ReviewerGateState | null, head: ReviewerHe
         <dt>{label}</dt>
         <dd>
           {stale ? <span className="header-chip warn">stale</span> : <span className="empty-line">no result</span>}
+          {sourceChip(head)}
           {attemptMeta}
         </dd>
       </div>
@@ -70,6 +97,7 @@ function gateRow(label: string, gate: ReviewerGateState | null, head: ReviewerHe
         <span className={`header-chip ${reviewerTone(gate.status)}`}>{REVIEWER_STATUS_LABEL[gate.status]}</span>
         {gate.acceptedBlockers > 0 ? <span className="run-action-name"> · {gate.acceptedBlockers} blocking</span> : null}
         {stale ? <span className="header-chip warn"> stale</span> : null}
+        {sourceChip(head)}
         {attemptMeta}
       </dd>
     </div>
@@ -132,8 +160,12 @@ export function ReviewSynthesisPane({
   const merge = findings?.merge ?? null;
   // Per-reviewer current-head evidence (issue #59), keyed by pane so each gate row
   // can show its attempt head and a stale label.
-  const headByPane = new Map<string, ReviewerHeadEvidence>(
-    (findings?.reviewerHeads ?? merge?.reviewerHeads ?? []).map((head) => [head.paneId, head]),
+  const reviewerHeads = findings?.reviewerHeads ?? merge?.reviewerHeads ?? [];
+  const headByPane = new Map<string, ReviewerHeadEvidence>(reviewerHeads.map((head) => [head.paneId, head]));
+  // Whether any reviewer's consumed evidence came from a role-signed fallback
+  // comment (issue #60), so the pane can explain the same-account fallback.
+  const usedFallback = reviewerHeads.some(
+    (head) => head.source === 'fallback_comment' || head.source === 'reconciled',
   );
   const canSynthesize = run !== null && SYNTHESIZE_RUN_STATUSES.includes(run.status);
   const inFixCycle = run?.status === 'builder_fixing';
@@ -187,6 +219,13 @@ export function ReviewSynthesisPane({
               </dd>
             </div>
           </dl>
+
+          {usedFallback ? (
+            <p className="run-hint" aria-label="Fallback verdict note">
+              A reviewer cleared via a role-signed verdict PR comment (harness evidence), not a formal GitHub
+              approval — expected when the same account owns the PR branch and GitHub refuses same-author approval.
+            </p>
+          ) : null}
 
           {merge && merge.reasons.length > 0 ? (
             <ul className="merge-reasons" aria-label="Merge gate reasons">

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   ONESHOT_REVIEWER_GENERIC_START_MESSAGE,
+  REVIEWER_VERDICT_MARKER,
   canPostReviewerMarker,
   canSynthesizeReviews,
   classifyGenericPaneLaunch,
@@ -22,6 +23,7 @@ import {
   reviewerAttemptsReplaced,
   reviewerCommentBody,
   reviewerLaunchArgs,
+  reviewerVerdictExampleLine,
   reviewerLaunchTransition,
 } from '../dist/main/reviewer.js';
 import { DEFAULT_CONFIG } from '../dist/main/config.js';
@@ -85,6 +87,40 @@ test('a verified PR produces a startable, pointer-first plan per configured revi
   assert.ok(!a.prompt.includes('{{'));
   // It is a pointer, not a paste: the prompt explicitly says the diff is not inlined.
   assert.match(a.prompt, /it is not pasted here/);
+});
+
+test('issue #60: the reviewer prompt documents the role-signed fallback verdict protocol', () => {
+  const plan = composeReviewerLaunch(DEFAULT_CONFIG, issueRun(), {
+    projectName: 'godmode',
+    pr: PR,
+    verified: true,
+  });
+  const [a, b] = plan.reviewers;
+
+  // Prefer a formal review; fall back to the role-signed verdict only when GitHub
+  // refuses same-account approval. The grammar is present and pane-specific.
+  assert.match(a.prompt, /FORMAL GitHub review/);
+  assert.match(a.prompt, /same account owns the PR branch/i);
+  assert.match(a.prompt, new RegExp(REVIEWER_VERDICT_MARKER));
+  assert.match(a.prompt, /reviewer=reviewer-a pane=reviewer_a pr=42/);
+  assert.match(b.prompt, /reviewer=reviewer-b pane=reviewer_b pr=42/);
+  // The blocked-verdict block label is pane-specific (A- vs B-).
+  assert.match(a.prompt, /BLOCKING A-1:/);
+  assert.match(b.prompt, /BLOCKING B-1:/);
+  // Framed as harness evidence, NOT a GitHub-native approval, distinct from the marker.
+  assert.match(a.prompt, /harness/i);
+  assert.match(a.prompt, /NOT a\s+GitHub-native approval/i);
+  assert.ok(!a.prompt.includes('{{'));
+});
+
+test('issue #60: reviewerVerdictExampleLine builds a pane-specific, parseable grammar line', () => {
+  const line = reviewerVerdictExampleLine('reviewer-b', 'reviewer_b', 7);
+  assert.match(line, /^GODMODE_REVIEW_VERDICT /);
+  assert.match(line, /reviewer=reviewer-b/);
+  assert.match(line, /pane=reviewer_b/);
+  assert.match(line, /pr=7/);
+  assert.match(line, /status=approved/);
+  assert.match(line, /blocking=0/);
 });
 
 test('default reviewers are one-shot and launch the non-interactive codex exec path', () => {

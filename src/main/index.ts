@@ -9,6 +9,7 @@ import {
   getCommitVerification,
   getGithubState,
   getIssueDetail,
+  getPrComments,
   postPrComment,
 } from './github.js';
 import type { DiscoveryContext } from './discovery.js';
@@ -95,6 +96,8 @@ import {
   computeMergeReadiness,
   currentHeadResults,
   parseReviewerOutput,
+  parseReviewerVerdictComments,
+  reconcileReviewerEvidence,
   renderBlockersText,
   reviewerHeadEvidence,
 } from './findings.js';
@@ -1729,6 +1732,13 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
     now,
   );
 
+  // Fallback verdict comments (issue #60): fetch the bound PR's comments so
+  // synthesis can parse role-signed verdicts when formal GitHub reviews are
+  // unavailable (e.g. the same authenticated account owns the PR branch in a
+  // dogfood run). Read-only and folded into the same await window the guards below
+  // protect; skipped when no PR head is resolvable (nothing to tie a verdict to).
+  const verdictComments = verification.pr ? await getPrComments(projectRoot, verification.pr.number) : null;
+
   // Stale guard: the operator may have switched project or cleared/replaced the
   // run during the await. Re-confirm the same run and root before any mutation.
   if (isReviewerRunContextStale({ runId: getCurrentRun()?.id ?? null, root: getSelectedProjectRoot() }, captured)) {
@@ -1780,14 +1790,46 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
   // stale attempt is dropped and explained, never read as current approval.
   const currentHeadSha = verification.pr?.headSha ?? null;
   const currentHeadShaShort = verification.pr?.headShaShort ?? null;
-  const reviewerHeads: ReviewerHeadEvidence[] = (updated.reviewers ?? []).map((session) =>
+  const sessionHeads: ReviewerHeadEvidence[] = (updated.reviewers ?? []).map((session) =>
     reviewerHeadEvidence(session, currentHeadSha),
   );
+  const artifactResults = parseReviewerResults(updated, projectRoot);
 
-  const results = parseReviewerResults(updated, projectRoot);
+  // Fallback verdict comments (issue #60): parse role-signed PR-comment verdicts
+  // for the configured reviewers and current head, then reconcile them with the
+  // captured-output artifacts into one effective evidence record per reviewer. The
+  // reconciled results + head evidence are what the merge gate consumes — a
+  // fallback verdict can clear a reviewer only when its head is current AND the #9
+  // commit gate is verified (the gate still requires `verification`), an
+  // artifact/verdict conflict routes to needs-human, and the `source` on each head
+  // tells the UI a clear came from a role-signed comment, not a formal approval.
+  const synthLoaded = loadConfig();
+  const synthConfig = synthLoaded.status === 'loaded' ? synthLoaded.config : DEFAULT_CONFIG;
+  const configuredReviewers = synthConfig.roles.reviewers.map((reviewer) => ({
+    reviewerId: reviewer.id,
+    paneId: reviewer.pane,
+  }));
+  const verdictParse = parseReviewerVerdictComments({
+    comments: verdictComments?.comments ?? [],
+    prNumber: verification.pr?.number ?? -1,
+    currentHeadSha,
+    reviewers: configuredReviewers,
+  });
+  const evidence = reconcileReviewerEvidence({
+    reviewers: configuredReviewers,
+    artifactResults,
+    sessionHeads,
+    verdicts: verdictParse.outcomes,
+    currentHeadSha,
+    currentHeadShaShort,
+  });
+  const results = evidence.map((item) => item.result);
+  const reviewerHeads = evidence.map((item) => item.head);
+
   const merge = computeMergeReadiness({ results, verification, reviewerHeads, currentHeadShaShort });
   // Only blockers from completed, current-head reviewer attempts open a fix cycle —
-  // a stale attempt's blockers are evidence about an old head, not the new one.
+  // a stale attempt's blockers are evidence about an old head, not the new one. A
+  // fallback `blocked` verdict's normalized blockers flow through here too.
   const blockers = acceptedBlockers(currentHeadResults(results, reviewerHeads));
   const findings: RunFindings = {
     runId: updated.id,
@@ -1851,8 +1893,12 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
       }
     }
   } else if (merge.recommendation === 'needs_human') {
+    // Surface the per-reviewer ambiguity notes (issue #60: malformed/conflicting
+    // fallback verdicts, artifact/verdict conflicts) alongside the gate reasons so
+    // the operator sees exactly why it routed to needs-human.
+    const ambiguousNotes = results.filter((result) => result.status === 'ambiguous').flatMap((result) => result.notes);
     const flagged = dispatchRunAction('flag_needs_human', {
-      reason: `Reviewer output is ambiguous or contradictory: ${merge.reasons.join(' ')}`,
+      reason: `Reviewer output is ambiguous or contradictory: ${[...merge.reasons, ...ambiguousNotes].join(' ')}`,
       actor,
     });
     if (flagged.ok) updated = flagged.run;

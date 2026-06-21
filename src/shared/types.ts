@@ -1321,6 +1321,86 @@ export type ReviewerResult = {
 };
 
 /**
+ * Where a reviewer's *consumed* evidence for the current head came from (issue
+ * #60). Synthesis prefers a reviewer's captured-output artifact, but in
+ * dogfooding the same GitHub account often owns the PR branch, so a reviewer
+ * cannot submit a formal approving GitHub review. In that case it posts a
+ * role-signed fallback verdict comment instead:
+ *
+ * - `artifact` — the gate consumed the reviewer's captured-output artifact (the
+ *   pre-#60 path);
+ * - `fallback_comment` — the gate consumed a role-signed `GODMODE_REVIEW_VERDICT`
+ *   PR comment for the current head because no usable artifact verdict existed.
+ *   This is **harness evidence, not a GitHub-native approval** — the UI must label
+ *   it so the operator understands why formal approval may still read unavailable;
+ * - `reconciled` — both an artifact result and a fallback comment existed for the
+ *   current head and they agreed, so the gate consumed the agreement.
+ */
+export type ReviewerEvidenceSource = 'artifact' | 'fallback_comment' | 'reconciled';
+
+/**
+ * The verdict a role-signed fallback comment (issue #60) declares for a reviewer.
+ * Mirrors the reviewer role docs: `approved` (clears its half of the gate) or
+ * `blocked` (carries structured blocking findings into the fix cycle).
+ */
+export type ReviewerVerdictStatus = 'approved' | 'blocked';
+
+/**
+ * A parsed, validated role-signed fallback verdict comment for the *current* PR
+ * head (issue #60). Produced by `parseReviewerVerdictComments` from a PR's
+ * comments only when the comment names a configured reviewer, the bound PR, and a
+ * head SHA matching the verified current head. It is deliberately distinct from
+ * GodMode's automatic marker comment (`reviewerCommentBody`), which never asserts
+ * a verdict.
+ */
+export type ReviewerFallbackVerdict = {
+  reviewerId: string;
+  paneId: AgentRole;
+  /** PR number the verdict was signed against (already matched to the bound PR). */
+  prNumber: number;
+  /** Head SHA as written in the comment (already matched to the current head). */
+  headSha: string;
+  status: ReviewerVerdictStatus;
+  /** Blocking count declared on the verdict line. */
+  declaredBlocking: number;
+  /** Structured blocking findings parsed from the comment (when `blocked`). */
+  findings: ReviewerFinding[];
+  /** GitHub login that authored the comment, retained for audit. */
+  author: string;
+  /** ISO timestamp the comment was created, retained for audit/ordering. */
+  createdAt: string;
+};
+
+/**
+ * Per-pane outcome of parsing a PR's fallback verdict comments (issue #60):
+ * either a single accepted current-head `verdict`, or `ambiguous` when the pane's
+ * current-head verdict is malformed or duplicate-conflicting. A pane with no
+ * attributable current-head verdict comment produces no outcome (its evidence
+ * comes from the artifact path). Stale-head, wrong-PR, unknown-reviewer, and
+ * non-verdict comments never produce an outcome — they are ignored safely.
+ */
+export type FallbackVerdictOutcome =
+  | { paneId: AgentRole; reviewerId: string; kind: 'verdict'; verdict: ReviewerFallbackVerdict }
+  | { paneId: AgentRole; reviewerId: string; kind: 'ambiguous'; reason: string };
+
+/** A marker-bearing comment that was ignored, with the reason, for audit. */
+export type IgnoredVerdictComment = {
+  reason: string;
+  author: string;
+};
+
+/**
+ * The result of parsing all of a PR's comments for role-signed fallback verdicts
+ * (issue #60): one {@link FallbackVerdictOutcome} per pane that had at least one
+ * attributable current-head verdict comment, plus an audit list of marker-bearing
+ * comments that were safely ignored (stale head, wrong PR, unknown reviewer).
+ */
+export type ReviewerVerdictParse = {
+  outcomes: FallbackVerdictOutcome[];
+  ignored: IgnoredVerdictComment[];
+};
+
+/**
  * Whether one reviewer clears its half of the merge gate, with the reason.
  * A reviewer clears when it passed (or raised zero accepted blocking findings)
  * and its output was not ambiguous.
@@ -1405,6 +1485,15 @@ export type ReviewerHeadEvidence = {
   current: boolean;
   /** True when the attempt reached a completed/comment-posted (parseable) state. */
   completed: boolean;
+  /**
+   * Where the reviewer's *consumed* current-head evidence came from (issue #60):
+   * the captured-output `artifact`, a role-signed `fallback_comment`, or
+   * `reconciled` agreement of both. Omitted on pre-#60 head evidence (which is
+   * always artifact/session-derived). Surfaced so the UI can label a reviewer
+   * that cleared via a role-signed comment as harness evidence, not a formal
+   * GitHub approval.
+   */
+  source?: ReviewerEvidenceSource;
 };
 
 /**

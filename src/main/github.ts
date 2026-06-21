@@ -491,6 +491,43 @@ export async function getIssueDetail(
   return { status: 'ok', issue };
 }
 
+/**
+ * Outcome of fetching a PR's comments. Mirrors the never-throw contract: every
+ * failure folds into `status`/`message` with an empty `comments` list, so
+ * synthesis can treat a failed fetch as "no fallback verdicts available" without
+ * crashing or guessing.
+ */
+export type PrCommentsResult = {
+  status: GithubStatus;
+  message?: string;
+  comments: GithubComment[];
+};
+
+/**
+ * Fetch a PR's issue comments for the operated project (issue #60). Read-only
+ * (`gh pr view <n> --json comments`), scoped to the operated-project root, and
+ * never throws. Used by review synthesis to parse role-signed fallback verdict
+ * comments when formal GitHub reviews are unavailable (e.g. the same authenticated
+ * account owns the PR branch in a dogfood run). `fetchedAt` is not needed — the
+ * caller already owns the clock for the surrounding synthesis.
+ */
+export async function getPrComments(projectRoot: string, prNumber: number): Promise<PrCommentsResult> {
+  const cwd = path.resolve(projectRoot);
+  const result = await runGh(['pr', 'view', String(prNumber), '--json', 'comments'], cwd);
+  if (!result.ok) {
+    return { status: result.status, message: result.message, comments: [] };
+  }
+  type RawComment = { author?: { login?: string }; body?: string; createdAt?: string };
+  type Raw = { comments?: RawComment[] };
+  const raw = parseJson<Raw | null>(result.stdout, null);
+  const comments: GithubComment[] = (raw?.comments ?? []).map((comment) => ({
+    author: comment.author?.login ?? 'unknown',
+    body: comment.body ?? '',
+    createdAt: comment.createdAt ?? '',
+  }));
+  return { status: 'ok', comments };
+}
+
 /** Options for the commit-verification gate. */
 export type CommitVerificationOptions = {
   /**
