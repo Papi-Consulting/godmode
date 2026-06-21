@@ -14,6 +14,7 @@ import {
   getPaneSessionState,
   getPaneSessionStates,
   openPtySession,
+  recordPaneLaunchFailure,
   resolveExecutable,
   setPaneSessionListener,
   stopPtySession,
@@ -226,6 +227,57 @@ test('a failed launch reports failed with a visible reason and no live session',
   assert.equal(state.lifecycle, 'failed');
   assert.equal(state.live, false);
   assert.match(state.error, /Command not found/);
+});
+
+test('recordPaneLaunchFailure marks a preflight rejection as failed (reviewer-b blocker #63)', () => {
+  // Regression guard: some Start paths refuse a launch BEFORE openPtySession is
+  // reached (no agent / non-cli adapter, one-shot reviewer generic-start gate,
+  // builder worktree setup failure). Those rejections must still drive main's
+  // pane state to `failed` so the header never falls back to a static
+  // ready/watching while the terminal shows an error.
+  makeProject();
+  recordPaneLaunchFailure('reviewer_a', 'This reviewer cannot be started from the pane.');
+  const state = getPaneSessionState('reviewer_a');
+  assert.equal(state.lifecycle, 'failed');
+  assert.equal(state.live, false);
+  assert.equal(state.pid, null);
+  assert.match(state.error, /cannot be started/);
+});
+
+test('recordPaneLaunchFailure ignores an unknown pane id', () => {
+  makeProject();
+  // No throw, and a real pane is untouched.
+  recordPaneLaunchFailure('not-a-pane', 'nope');
+  const states = getPaneSessionStates();
+  assert.equal(states.find((s) => s.paneId === 'not-a-pane'), undefined);
+});
+
+test('recordPaneLaunchFailure never clobbers a still-live session', () => {
+  // A failed *restart* preflight must not mark a pane failed while its prior
+  // session is still running — same "don't clobber a live session" guard as the
+  // in-spawn failure path.
+  const root = makeProject();
+  const started = openPtySession({ paneId: 'head', projectRoot: root, command: 'cat', onData: () => {}, onExit: () => {} });
+  assert.equal(started.ok, true, started.ok ? '' : started.error);
+  recordPaneLaunchFailure('head', 'a restart with a broken command was rejected');
+  const state = getPaneSessionState('head');
+  assert.equal(state.lifecycle, 'running');
+  assert.equal(state.live, true);
+  stopPtySession('head');
+});
+
+test('recordPaneLaunchFailure notifies the session listener', () => {
+  makeProject();
+  const snapshots = [];
+  setPaneSessionListener((states) => snapshots.push(states));
+  try {
+    recordPaneLaunchFailure('reviewer_b', 'preflight rejection');
+    assert.ok(snapshots.length >= 1, 'listener should fire on a preflight failure');
+    const last = snapshots[snapshots.length - 1].find((s) => s.paneId === 'reviewer_b');
+    assert.equal(last.lifecycle, 'failed');
+  } finally {
+    setPaneSessionListener(null);
+  }
 });
 
 test('setPaneSessionListener receives a snapshot on every lifecycle change', () => {

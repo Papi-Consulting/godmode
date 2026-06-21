@@ -19,6 +19,7 @@ import {
   hasPtySession,
   killAllPtySessions,
   openPtySession,
+  recordPaneLaunchFailure,
   resizePtySession,
   setPaneSessionListener,
   stopPtySession,
@@ -774,6 +775,9 @@ async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promis
   // unconfigured builder fails visibly here rather than spawning.
   const launch = resolveRoleLaunch('builder');
   if (!launch.ok) {
+    // Preflight rejection of the recovery relaunch never reaches openPtySession;
+    // record the builder pane's `failed` lifecycle so main stays truthful (#63).
+    recordPaneLaunchFailure('builder', launch.error);
     return { ok: false, code: 'no_builder_session', error: launch.error, run };
   }
 
@@ -785,7 +789,10 @@ async function handleRelaunchBuilder(event: Electron.IpcMainInvokeEvent): Promis
   const projectRoot = getSelectedProjectRoot();
   const ensured = await ensureRunWorktree(run);
   if (ensured.mode === 'worktree' && !ensured.ok) {
-    return { ok: false, code: 'worktree_failed', error: `Run worktree setup failed: ${ensured.error}`, run: getCurrentRun() };
+    const error = `Run worktree setup failed: ${ensured.error}`;
+    // Recovery relaunch preflight failure never reaches openPtySession (#63).
+    recordPaneLaunchFailure('builder', error);
+    return { ok: false, code: 'worktree_failed', error, run: getCurrentRun() };
   }
   run = getCurrentRun() ?? run;
   let cwd = projectRoot;
@@ -1732,6 +1739,9 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
     const resolved = resolveRoleLaunch(reviewer.paneId);
     if (!resolved.ok) {
       updateCurrentRunReviewer(reviewer.paneId, { status: 'failed', error: resolved.error });
+      // The reviewer launch never reaches openPtySession, so the pane registry
+      // would keep its stale lifecycle; record the preflight `failed` here (#63).
+      recordPaneLaunchFailure(reviewer.paneId, resolved.error);
       continue;
     }
 
@@ -2318,6 +2328,9 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
   // (no agent, non-cli adapter) returns a visible error instead of spawning.
   const launch = resolveRoleLaunch(payload.paneId);
   if (!launch.ok) {
+    // Preflight rejection never reaches openPtySession, so record the `failed`
+    // lifecycle here too — main stays the single source of truth (#63).
+    recordPaneLaunchFailure(payload.paneId, launch.error);
     return { ok: false, paneId: payload.paneId, error: launch.error };
   }
 
@@ -2328,6 +2341,7 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
   // prompt (e.g. an empty `codex exec`). Keys off role + mode, not a vendor branch.
   const genericLaunch = classifyGenericPaneLaunch(payload.paneId, launch.spec.mode);
   if (!genericLaunch.allowed) {
+    recordPaneLaunchFailure(payload.paneId, genericLaunch.reason);
     return { ok: false, paneId: payload.paneId, error: genericLaunch.reason };
   }
 
@@ -2345,7 +2359,9 @@ async function handleStartPty(event: Electron.IpcMainInvokeEvent, input: unknown
       const ensured = await ensureRunWorktree(run);
       if (ensured.mode === 'worktree') {
         if (!ensured.ok) {
-          return { ok: false, paneId: payload.paneId, error: `Run worktree setup failed: ${ensured.error}` };
+          const error = `Run worktree setup failed: ${ensured.error}`;
+          recordPaneLaunchFailure(payload.paneId, error);
+          return { ok: false, paneId: payload.paneId, error };
         }
         cwd = ensured.worktree.path;
         worktreePath = ensured.worktree.path;

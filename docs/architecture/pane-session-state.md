@@ -49,11 +49,26 @@ means every pane is consistent without each caller re-deriving state. The regist
 notifies a single listener (`setPaneSessionListener`); main wires that to push
 `godmode:pty:state` to the renderer.
 
+Some callers refuse a launch in a **preflight step before `openPtySession` is ever
+reached** — `resolveRoleLaunch` rejects a non-cli/unconfigured role, the generic
+pane-start gate refuses a one-shot reviewer (issue #58), or builder run-worktree
+setup fails (issue #41). Those rejections return a typed error without entering the
+spawn path, so they would otherwise leave main's pane state stale (the header
+falling back to a static `ready`/`watching` while the terminal shows the error).
+`recordPaneLaunchFailure(paneId, error)` closes that gap: every preflight rejection
+in `handleStartPty`, `handleStartReviewers`, and the builder recovery relaunch calls
+it, so the pane still transitions to `failed`. It shares the in-spawn failure path's
+guard (it never clobbers a still-live session, and ignores an unknown pane id), and
+`openPtySession`'s own failure path delegates to it so there is one state-write code
+path.
+
 State transitions:
 
 - `openPtySession` success → `running`; failure → `failed` **only when no live
   session remains** (a failed *restart* must not clobber a session that is still
   alive, since the existing PTY is killed only after the new command validates).
+- A preflight launch rejection (before `openPtySession`) →
+  `recordPaneLaunchFailure` → `failed`, under the same no-clobber guard.
 - The tracked `onExit` → `exited` with the exit code/signal.
 - `stopPtySession` → `stopped` (its `onExit` bails out because the session was
   already removed, so the stop is recorded explicitly).
@@ -99,9 +114,10 @@ lifecycle.
 
 - `test/pty.test.js` covers the registry directly: a live session reports
   `running` then `stopped`; a one-shot process reports `exited` with its code; a
-  failed launch reports `failed` with a reason and no live session; the listener
-  fires on every change; and `detectPromptAttention` fires only on generic
-  prompts.
+  failed launch reports `failed` with a reason and no live session; a preflight
+  rejection via `recordPaneLaunchFailure` reports `failed` (and never clobbers a
+  live session or a foreign pane id); the listener fires on every change; and
+  `detectPromptAttention` fires only on generic prompts.
 - `test/e2e/smoke.mjs` (assertion 7b) drives the real app: after the fake one-shot
   builder exits, the builder pane reports `exited` with the real code and the
   message Send control is disabled — the regression guard against a dead pane

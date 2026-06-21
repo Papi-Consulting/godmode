@@ -128,6 +128,33 @@ function updatePaneSession(paneId: AgentRole, patch: Partial<PaneSessionState>):
 }
 
 /**
+ * Record a launch rejection that happens BEFORE {@link openPtySession} is reached
+ * (issue #63). Some callers refuse a Start/Restart in a preflight step — no agent
+ * configured / non-cli adapter (`resolveRoleLaunch`), a one-shot reviewer blocked
+ * by the generic-start gate, or a builder run-worktree setup failure — and return
+ * a typed error without ever entering the spawn path. Without this, main's
+ * authoritative pane state stays `never_started`/`exited`/`stopped` and the header
+ * falls back to a static `ready`/`watching` while the terminal shows an error,
+ * breaking #63's single-source-of-truth model.
+ *
+ * This mirrors the in-spawn `failed` transition so EVERY launch path funnels the
+ * lifecycle through this registry. Guarded exactly like a failed restart: it never
+ * clobbers a still-live session for the pane (an unknown pane id is ignored).
+ */
+export function recordPaneLaunchFailure(paneId: string, error: string): void {
+  if (!allowedPaneIds.has(paneId)) return;
+  if (sessions.has(paneId)) return;
+  updatePaneSession(paneId as AgentRole, {
+    lifecycle: 'failed',
+    error,
+    pid: null,
+    exitCode: null,
+    signal: null,
+    awaitingInput: false,
+  });
+}
+
+/**
  * Whether a chunk of recent PTY output looks like the agent is blocked on operator
  * input (issue #63 scope 3). Deliberately conservative and vendor-neutral: it only
  * fires on the trailing line, on a small set of documented, generic
@@ -257,16 +284,7 @@ export function openPtySession(input: OpenPtyInput): PtyStartResult {
   // live (the existing session is only killed once the new command is validated),
   // so skip the state write when a live session remains for the pane.
   const fail = (error: string): PtyStartResult => {
-    if (allowedPaneIds.has(input.paneId) && !sessions.has(input.paneId)) {
-      updatePaneSession(input.paneId as AgentRole, {
-        lifecycle: 'failed',
-        error,
-        pid: null,
-        exitCode: null,
-        signal: null,
-        awaitingInput: false,
-      });
-    }
+    recordPaneLaunchFailure(input.paneId, error);
     return { ok: false, paneId: input.paneId, error };
   };
 
