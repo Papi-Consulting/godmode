@@ -108,6 +108,39 @@ from `availableActions` and rejects it if attempted, so the loop stops
 deterministically at the budget. The operator/orchestrator then routes to
 `max_cycles_exceeded`, `merge_ready`, or `needs_human`.
 
+### Merge-ready evidence gate (#62)
+
+`mark_merge_ready` is structurally legal from `review_synthesis`, `needs_human`,
+and `max_cycles_exceeded`, but it is **evidence-gated** in the state-machine path —
+not merely hidden in the renderer. A pure predicate `canMarkMergeReady(run)` is the
+single authority both `computeAvailableActions` (what is advertised) and
+`applyAction` (what is permitted) consult, so an ambiguous, missing, or stale
+merge-ready can never reach `merge_ready` through the generic transition table, a
+direct IPC dispatch, or a manual operator click. The predicate allows the
+transition only when the run's own recorded evidence is current and positive:
+
+- parsed synthesis `findings` exist and `findings.merge.mergeReady === true` —
+  which itself requires both reviewers cleared for the current PR head, no
+  ambiguity, no accepted blockers, and the verified #9 commit evidence (see
+  `docs/architecture/review-synthesis.md`);
+- the run's latest recorded #9 verification is `verified` **and** current-head
+  verified (#61), so a verification that went `stale_head` after a positive
+  synthesis invalidates the gate;
+- the head those findings were computed against still matches that latest
+  verification's head, so head drift after a positive synthesis cannot leave a
+  stale "merge-ready" decision standing.
+
+A rejected `mark_merge_ready` returns `{ ok: false, code: 'merge_evidence_required' }`
+with the unchanged snapshot (no mutation) — a distinct code from
+`invalid_transition` so the UI tells "not allowed from here" apart from "allowed,
+but the merge gate is not satisfied yet". There is **no** evidence-free manual
+override in v1: the ordinary override path is removed by gating, so the only way to
+`merge_ready` is real, current, positive evidence (whether the automatic synthesis
+path dispatches it or an operator clicks it once the gate is satisfied). When the
+run is in a merge-gate status but the gate is unmet, `RunControlPane` renders a hint
+explaining why merge-ready is held (sourced from the recorded merge-gate reasons)
+rather than silently omitting the button.
+
 Interrupts are available from every **active** (non-terminal, non-paused) status
 and are merged into the table in one place:
 

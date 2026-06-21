@@ -11,6 +11,7 @@ import {
   adoptExpectedCommit,
   adoptResumedRun,
   applyAction,
+  canMarkMergeReady,
   clearRun,
   computeAvailableActions,
   createRun,
@@ -35,6 +36,86 @@ import {
 } from '../dist/main/run.js';
 
 const NOW = '2026-06-06T12:00:00.000Z';
+
+// A deterministic 40-char head SHA the merge-evidence fixtures share (issue #62).
+const HEAD_SHA = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
+/** A recorded #9 verification log entry (issue #62 merge-evidence fixtures). */
+function verificationEntry(overrides = {}) {
+  return {
+    at: NOW,
+    status: 'verified',
+    expectedCommit: HEAD_SHA,
+    source: 'run_recorded',
+    prNumber: undefined,
+    prState: 'OPEN',
+    verifiedHeadSha: HEAD_SHA,
+    currentHeadVerified: true,
+    summary: 'Expected commit is the verified current PR head.',
+    ...overrides,
+  };
+}
+
+/** Positive merge-gate findings for the run's current head (issue #62). */
+function mergeReadyFindings(run, headSha = HEAD_SHA) {
+  return {
+    runId: run.id,
+    cycle: run.cycle,
+    results: [],
+    merge: {
+      mergeReady: true,
+      reviewerA: { reviewerId: 'rev-a', paneId: 'reviewer_a', status: 'pass', cleared: true, acceptedBlockers: 0 },
+      reviewerB: { reviewerId: 'rev-b', paneId: 'reviewer_b', status: 'pass', cleared: true, acceptedBlockers: 0 },
+      prVerified: true,
+      noAcceptedBlockers: true,
+      anyAmbiguous: false,
+      recommendation: 'merge_ready',
+      reasons: ['Both reviewers cleared and the PR commit is verified — merge-ready.'],
+      prHeadShaShort: headSha.slice(0, 7),
+    },
+    acceptedBlockers: [],
+    prHeadSha: headSha,
+    prHeadShaShort: headSha.slice(0, 7),
+    fetchedAt: NOW,
+  };
+}
+
+/** Ambiguous (needs-human) findings: merge gate not satisfied (issue #62). */
+function ambiguousFindings(run) {
+  return {
+    runId: run.id,
+    cycle: run.cycle,
+    results: [],
+    merge: {
+      mergeReady: false,
+      reviewerA: { reviewerId: 'rev-a', paneId: 'reviewer_a', status: 'ambiguous', cleared: false, acceptedBlockers: 0 },
+      reviewerB: null,
+      prVerified: true,
+      noAcceptedBlockers: true,
+      anyAmbiguous: true,
+      recommendation: 'needs_human',
+      reasons: ['Reviewer A output is ambiguous; a human must review it.'],
+      prHeadShaShort: HEAD_SHA.slice(0, 7),
+    },
+    acceptedBlockers: [],
+    prHeadSha: HEAD_SHA,
+    prHeadShaShort: HEAD_SHA.slice(0, 7),
+    fetchedAt: NOW,
+  };
+}
+
+/**
+ * Attach current, positive merge evidence so `mark_merge_ready` is permitted by the
+ * state-machine gate (issue #62): a verified current-head #9 verification plus
+ * positive synthesis findings for that same head.
+ */
+function withMergeEvidence(run, headSha = HEAD_SHA) {
+  return {
+    ...run,
+    verifications: [...run.verifications, verificationEntry({ verifiedHeadSha: headSha, expectedCommit: headSha })],
+    findings: mergeReadyFindings(run, headSha),
+  };
+}
 
 /** Drive a run through a sequence of actions, asserting each one succeeds. */
 function advance(run, steps) {
@@ -62,16 +143,18 @@ test('createRun starts idle with only select_issue available', () => {
 
 test('happy path advances idle → … → merge_ready → karan_merged → closed', () => {
   const run = createRun({ issueNumber: 12, now: NOW, id: 'run-happy' });
-  const merged = advance(run, [
+  const synth = advance(run, [
     'select_issue',
     'mark_ready',
     'start_builder',
     { action: 'open_pr', options: { branch: 'feat/12', prNumber: 12 } },
     'start_reviewers',
     'synthesize_reviews',
-    'mark_merge_ready',
-    'mark_merged',
   ]);
+  // Issue #62: mark_merge_ready is reachable only with current, positive merge
+  // evidence on the run snapshot — the synthesis path records exactly this before
+  // dispatching mark_merge_ready.
+  const merged = advance(withMergeEvidence(synth), ['mark_merge_ready', 'mark_merged']);
   assert.equal(merged.status, 'karan_merged');
   assert.equal(merged.branch, 'feat/12');
   assert.equal(merged.prNumber, 12);
@@ -144,9 +227,12 @@ test('request_fix is bounded by maxCycles', () => {
   assert.equal(rejected.code, 'invalid_transition');
   assert.match(rejected.error, /budget/i);
   assert.equal(rejected.run.status, 'review_synthesis');
-  // At the cap the operator can still escalate or merge.
+  // At the cap the operator can still escalate. mark_merge_ready stays evidence-
+  // gated (issue #62): without positive findings it is NOT advertised, but it
+  // appears once current, positive merge evidence is recorded.
   assert.ok(synth1.availableActions.includes('exceed_max_cycles'));
-  assert.ok(synth1.availableActions.includes('mark_merge_ready'));
+  assert.ok(!synth1.availableActions.includes('mark_merge_ready'), 'no evidence-free merge-ready at the cap');
+  assert.ok(computeAvailableActions(withMergeEvidence(synth1)).includes('mark_merge_ready'));
 
   // maxCycles: 2 allows exactly one fix cycle, then the cap blocks the next.
   let run = advance(createRun({ issueNumber: 31, maxCycles: 2, now: NOW, id: 'run-cap2' }), [
@@ -351,8 +437,9 @@ test('flag_needs_human records reason and blocker, cleared on recovery', () => {
   assert.equal(flagged.blocker, 'pr_conflicted');
   assert.equal(flagged.reason, 'merge conflict on main');
 
-  // Operator overrides to merge-ready: blocker/reason must clear.
-  const overridden = applyAction(flagged, 'mark_merge_ready', { now: NOW }).run;
+  // Operator routes to merge-ready: only legal with current, positive merge
+  // evidence (issue #62), and on success the blocker/reason must clear.
+  const overridden = applyAction(withMergeEvidence(flagged), 'mark_merge_ready', { now: NOW }).run;
   assert.equal(overridden.status, 'merge_ready');
   assert.equal(overridden.blocker, undefined);
   assert.equal(overridden.reason, undefined);
@@ -372,7 +459,7 @@ test('agent failure is recoverable back to ready_to_build', () => {
   assert.equal(recovered.status, 'ready_to_build');
 });
 
-test('max_cycles_exceeded can be force-resolved to merge_ready', () => {
+test('max_cycles_exceeded reaches merge_ready only with positive merge evidence', () => {
   const fixing = advance(createRun({ issueNumber: 7, now: NOW, id: 'run-mc' }), [
     'select_issue',
     'mark_ready',
@@ -385,7 +472,15 @@ test('max_cycles_exceeded can be force-resolved to merge_ready', () => {
   const exceeded = applyAction(fixing, 'exceed_max_cycles', { now: NOW, reason: 'looping' }).run;
   assert.equal(exceeded.status, 'max_cycles_exceeded');
 
-  const forced = applyAction(exceeded, 'mark_merge_ready', { now: NOW });
+  // Issue #62: an evidence-free merge-ready is refused (no positive findings),
+  // leaving the run untouched.
+  const refused = applyAction(exceeded, 'mark_merge_ready', { now: NOW });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'merge_evidence_required');
+  assert.equal(refused.run.status, 'max_cycles_exceeded');
+
+  // With current, positive merge evidence it is permitted.
+  const forced = applyAction(withMergeEvidence(exceeded), 'mark_merge_ready', { now: NOW });
   assert.equal(forced.ok, true);
   assert.equal(forced.run.status, 'merge_ready');
 
@@ -426,9 +521,13 @@ test('computeAvailableActions exposes forward edges plus interrupts', () => {
     'synthesize_reviews',
   ]);
   const actions = computeAvailableActions(synth);
-  for (const expected of ['request_fix', 'mark_merge_ready', 'flag_needs_human', 'pause', 'cancel']) {
+  for (const expected of ['request_fix', 'flag_needs_human', 'pause', 'cancel']) {
     assert.ok(actions.includes(expected), `expected ${expected} to be available from review_synthesis`);
   }
+  // Issue #62: mark_merge_ready is evidence-gated, so it is NOT advertised from a
+  // freshly-synthesized run with no positive findings, but appears once they exist.
+  assert.ok(!actions.includes('mark_merge_ready'), 'no evidence-free merge-ready from review_synthesis');
+  assert.ok(computeAvailableActions(withMergeEvidence(synth)).includes('mark_merge_ready'));
   // Idle exposes no interrupts — it is not an active state.
   assert.deepEqual(computeAvailableActions(createRun({ now: NOW, id: 'run-idle2' })), ['select_issue']);
 });
@@ -964,5 +1063,132 @@ test('setCurrentRunWorktree without expectedRunId stays backward-compatible (rec
   const updated = setCurrentRunWorktree(SAMPLE_WORKTREE);
   assert.ok(updated);
   assert.deepEqual(updated.worktree, SAMPLE_WORKTREE);
+  clearRun();
+});
+
+// --- Merge-ready evidence gate (issue #62) ----------------------------------
+// `mark_merge_ready` is structurally legal from review_synthesis/needs_human/
+// max_cycles_exceeded, but the state-machine gate (`canMarkMergeReady`) refuses it
+// unless the run holds current, positive merge evidence. These tests pin the gate
+// so an ambiguous/missing/stale-evidence merge-ready can never regress in via the
+// generic transition table or a direct IPC/manual dispatch.
+
+/** A review_synthesis run with no findings yet (the synthesis just transitioned). */
+function synthesisRun(id = 'run-62') {
+  return advance(createRun({ issueNumber: 62, now: NOW, id }), [
+    'select_issue',
+    'mark_ready',
+    'start_builder',
+    { action: 'open_pr', options: { branch: 'feat/62', prNumber: 62 } },
+    'start_reviewers',
+    'synthesize_reviews',
+  ]);
+}
+
+test('#62 canMarkMergeReady: false without findings, true with current positive evidence', () => {
+  const synth = synthesisRun('run-62-pred');
+  assert.equal(canMarkMergeReady(synth), false, 'no findings → not merge-ready');
+  assert.equal(canMarkMergeReady(withMergeEvidence(synth)), true, 'positive current-head evidence → merge-ready');
+});
+
+test('#62 ambiguous reviewer findings cannot mark merge-ready (regression guard)', () => {
+  // Construct a run in needs_human with ambiguous reviewer findings.
+  const synth = synthesisRun('run-62-amb');
+  const ambiguous = {
+    ...applyAction(synth, 'flag_needs_human', { now: NOW, reason: 'ambiguous reviewer output' }).run,
+    findings: ambiguousFindings(synth),
+    verifications: [verificationEntry({ prNumber: 62 })],
+  };
+  assert.equal(ambiguous.status, 'needs_human');
+  const before = JSON.stringify(ambiguous);
+
+  const result = applyAction(ambiguous, 'mark_merge_ready', { now: NOW });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'merge_evidence_required');
+  assert.match(result.error, /positive merge evidence/i);
+  assert.equal(result.run.status, 'needs_human', 'rejected merge-ready must not mutate the run');
+  assert.equal(JSON.stringify(ambiguous), before, 'applyAction must not mutate its input on rejection');
+  // The button is not advertised either.
+  assert.ok(!computeAvailableActions(ambiguous).includes('mark_merge_ready'));
+});
+
+test('#62 missing a reviewer (gate not satisfied) cannot mark merge-ready', () => {
+  const synth = synthesisRun('run-62-missing');
+  const findings = mergeReadyFindings(synth);
+  // Reviewer B never produced a usable result → gate not satisfied.
+  findings.merge = { ...findings.merge, mergeReady: false, reviewerB: null, recommendation: 'hold' };
+  const run = { ...synth, findings, verifications: [verificationEntry({ prNumber: 62 })] };
+  assert.equal(canMarkMergeReady(run), false);
+  const result = applyAction(run, 'mark_merge_ready', { now: NOW });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'merge_evidence_required');
+  assert.equal(result.run.status, 'review_synthesis');
+});
+
+test('#62 stale / non-current-head verification cannot mark merge-ready', () => {
+  const synth = synthesisRun('run-62-stale');
+  // Positive findings, but the latest recorded verification is stale_head (#61):
+  // the head drifted after synthesis, so the merge decision no longer applies.
+  const staleByStatus = {
+    ...synth,
+    findings: mergeReadyFindings(synth),
+    verifications: [verificationEntry({ status: 'stale_head', currentHeadVerified: false })],
+  };
+  assert.equal(canMarkMergeReady(staleByStatus), false, 'stale_head verification → not merge-ready');
+  assert.equal(applyAction(staleByStatus, 'mark_merge_ready', { now: NOW }).ok, false);
+
+  // Or the head simply drifted: latest verified head differs from the findings head.
+  const driftedHead = {
+    ...synth,
+    findings: mergeReadyFindings(synth, HEAD_SHA),
+    verifications: [verificationEntry({ verifiedHeadSha: 'f'.repeat(40), expectedCommit: 'f'.repeat(40) })],
+  };
+  assert.equal(canMarkMergeReady(driftedHead), false, 'findings head ≠ latest verified head → not merge-ready');
+  assert.equal(applyAction(driftedHead, 'mark_merge_ready', { now: NOW }).ok, false);
+});
+
+test('#62 missing verification (positive findings only) cannot mark merge-ready', () => {
+  const synth = synthesisRun('run-62-noverify');
+  const run = { ...synth, findings: mergeReadyFindings(synth) }; // no verifications recorded
+  assert.equal(canMarkMergeReady(run), false);
+  assert.equal(applyAction(run, 'mark_merge_ready', { now: NOW }).code, 'merge_evidence_required');
+});
+
+test('#62 positive current-head evidence permits merge-ready from every gate status', () => {
+  // review_synthesis
+  const synth = synthesisRun('run-62-ok-rs');
+  const fromSynth = applyAction(withMergeEvidence(synth), 'mark_merge_ready', { now: NOW });
+  assert.equal(fromSynth.ok, true);
+  assert.equal(fromSynth.run.status, 'merge_ready');
+
+  // needs_human
+  const flagged = applyAction(synth, 'flag_needs_human', { now: NOW, reason: 'check' }).run;
+  const fromNeedsHuman = applyAction(withMergeEvidence(flagged), 'mark_merge_ready', { now: NOW });
+  assert.equal(fromNeedsHuman.ok, true);
+  assert.equal(fromNeedsHuman.run.status, 'merge_ready');
+
+  // max_cycles_exceeded
+  const exceeded = applyAction(synth, 'exceed_max_cycles', { now: NOW, reason: 'budget' }).run;
+  const fromExceeded = applyAction(withMergeEvidence(exceeded), 'mark_merge_ready', { now: NOW });
+  assert.equal(fromExceeded.ok, true);
+  assert.equal(fromExceeded.run.status, 'merge_ready');
+});
+
+test('#62 controller dispatch (IPC path) is guarded too', () => {
+  clearRun();
+  const started = selectIssueRun({ issueNumber: 62, issueTitle: 'Merge gate', id: 'run-62-ctl', now: NOW });
+  assert.equal(started.ok, true);
+  // Drive the controller to review_synthesis.
+  for (const action of ['mark_ready', 'start_builder']) dispatchRunAction(action, { now: NOW });
+  dispatchRunAction('open_pr', { now: NOW, branch: 'feat/62', prNumber: 62 });
+  dispatchRunAction('start_reviewers', { now: NOW });
+  dispatchRunAction('synthesize_reviews', { now: NOW });
+  assert.equal(getCurrentRun().status, 'review_synthesis');
+
+  // A direct dispatch with no evidence is refused and does not mutate the run.
+  const refused = dispatchRunAction('mark_merge_ready', { now: NOW });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'merge_evidence_required');
+  assert.equal(getCurrentRun().status, 'review_synthesis');
   clearRun();
 });

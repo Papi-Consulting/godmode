@@ -201,6 +201,17 @@ Max-cycle handling stays authoritative in the state machine: `request_fix`
 increments `cycle` and the guard refuses it once `cycle >= maxCycles`, so the
 loop deterministically stops at the budget.
 
+The `mark_merge_ready` transition this step dispatches is itself evidence-gated in
+the state machine (issue #62): `canMarkMergeReady(run)` permits it only when the
+run's recorded `findings.merge.mergeReady` is true for the current head and the
+latest #9 verification is current-head `verified`. The automatic path above
+satisfies this by construction — it records the verification and persists the
+positive findings *before* dispatching `mark_merge_ready` — but the same gate also
+blocks any out-of-band operator/IPC attempt to force `merge_ready` from
+`review_synthesis`/`needs_human`/`max_cycles_exceeded` on ambiguous, missing, or
+stale evidence. There is no evidence-free manual merge override in v1. See
+`docs/architecture/run-state-machine.md` (“Merge-ready evidence gate”).
+
 ## The fix cycle
 
 On `request_fix`, `composeFixHandoff` renders the `builder_fix` template with the

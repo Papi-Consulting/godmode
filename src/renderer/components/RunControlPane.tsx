@@ -119,6 +119,16 @@ const ISOLATION_TOGGLE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
 // worktree cleanup is only offered once the run is finished.
 const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['closed', 'cancelled', 'karan_merged']);
 
+// Statuses from which `mark_merge_ready` is structurally legal but evidence-gated
+// (issue #62). When the run is in one of these but the merge gate is not satisfied,
+// the button is absent — so we explain *why* merge-ready is held instead of leaving
+// the operator guessing why a state-machine action they expected is missing.
+const MERGE_GATE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'review_synthesis',
+  'needs_human',
+  'max_cycles_exceeded',
+]);
+
 type RunControlPaneProps = {
   run: RunSnapshot | null;
   /** Most recent rejected-action message, surfaced inline. */
@@ -332,6 +342,13 @@ export function RunControlPane({
   // never render the old evidence-free "PR opened" button. A manual fallback below
   // still requires a PR number and is labeled unverified.
   const actionButtons = run ? run.availableActions.filter((action) => action !== 'open_pr') : [];
+  // Merge-ready is evidence-gated in the state machine (issue #62): when the run is
+  // in a merge-gate status but `mark_merge_ready` is not advertised, the gate is
+  // unmet. Surface the recorded merge-gate reasons so the operator sees exactly why,
+  // rather than wondering where the merge-ready button went.
+  const mergeReadyHeld =
+    run !== null && MERGE_GATE_STATUSES.has(run.status) && !run.availableActions.includes('mark_merge_ready');
+  const mergeReadyReasons = run?.findings?.merge.reasons ?? [];
   const manualPrNumber = Number.parseInt(manualPr, 10);
   const manualPrValid = Number.isInteger(manualPrNumber) && manualPrNumber > 0;
   const showDogfoodNudge = isAppRepo && run !== null && run.isolation === 'shared' && canToggleIsolation;
@@ -547,6 +564,17 @@ export function RunControlPane({
                 <span className="empty-line">No actions available from this state.</span>
               )}
             </div>
+
+            {mergeReadyHeld ? (
+              <p className="run-merge-hint" role="note">
+                Merge-ready is held. GodMode requires both reviewers cleared for the current PR head, no ambiguous
+                reviewer output, no accepted blockers, and a verified current-head commit before this run can be marked
+                merge-ready.
+                {mergeReadyReasons.length > 0
+                  ? ` ${mergeReadyReasons.join(' ')}`
+                  : ' Synthesize reviews to compute the merge gate.'}
+              </p>
+            ) : null}
 
             {showDiscovery ? (
               <details className="run-pr-manual">
