@@ -303,6 +303,15 @@ export type GithubPullRequest = {
   isDraft: boolean;
   /** APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none. */
   reviewDecision: string;
+  /**
+   * Remote PR head commit SHA (`headRefOid`), read live from GitHub, or '' when
+   * unavailable. Issue #61: the repo-wide pull list carries this so a GitHub
+   * refresh can reconcile a bound run's PR head *independent of the primary
+   * checkout branch*. That matters for worktree-isolated runs (issue #41), whose
+   * PR branch lives in the run worktree, not the primary checkout — the
+   * current-branch active PR would never observe their bound head.
+   */
+  headSha: string;
 };
 
 export type GithubReview = {
@@ -358,13 +367,10 @@ export type GithubCheck = {
 /** The PR (if any) whose head matches the selected repo's current branch. */
 export type GithubActivePullRequest = GithubPullRequest & {
   url: string;
-  /**
-   * Remote PR head commit SHA (`headRefOid`), read live from GitHub. Issue #61:
-   * the GitHub refresh observes this head, so main can reconcile it against the
-   * run's latest recorded verification and stale the displayed evidence as soon as
-   * the bound PR head moves — without waiting for a manual re-verify.
-   */
-  headSha: string;
+  // `headSha` (the remote PR head, used by issue #61 reconciliation) is inherited
+  // from GithubPullRequest so both the active PR and the repo-wide pull list carry
+  // it; the active PR observes the current-branch head, the pull list observes any
+  // bound PR's head regardless of the primary checkout branch.
   reviews: GithubReview[];
   comments: GithubComment[];
   checks: GithubCheck[];

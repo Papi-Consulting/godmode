@@ -591,6 +591,37 @@ export function observedHeadDrifted(
   return !commitMatches(latest.verifiedHeadSha, observedHeadSha);
 }
 
+/** A PR observation reduced to the fields head reconciliation needs (issue #61). */
+export type ObservedPrHead = { number: number; headSha: string };
+
+/**
+ * Select which observed PR head a GitHub snapshot should reconcile for a bound run
+ * (issue #61). The active PR is resolved from the *primary checkout's* current
+ * branch, so for a worktree-isolated run (issue #41) — whose PR branch lives in the
+ * run worktree, not the primary checkout — the active PR is a different PR (or
+ * none) and never observes the bound head. The repo-wide pull list, by contrast,
+ * lists every PR regardless of checkout branch, so matching `run.prNumber` there
+ * observes the bound PR's head in both shared and worktree-isolated runs.
+ *
+ * Precedence: when bound (`prNumber` set), prefer the matching pull-list entry that
+ * carries a head SHA; otherwise fall back to the current-branch active PR. Returns
+ * null when there is no usable head to observe. Pure so the worktree-isolated
+ * selection is unit-tested without Electron or `gh`.
+ */
+export function selectObservedBoundPrHead(
+  snapshot: { activePr: ObservedPrHead | null; pulls: ObservedPrHead[] },
+  prNumber: number | undefined,
+): ObservedPrHead | null {
+  if (prNumber !== undefined) {
+    const bound = snapshot.pulls.find((pull) => pull.number === prNumber && Boolean(pull.headSha));
+    if (bound) return { number: bound.number, headSha: bound.headSha };
+  }
+  if (snapshot.activePr && snapshot.activePr.headSha) {
+    return { number: snapshot.activePr.number, headSha: snapshot.activePr.headSha };
+  }
+  return null;
+}
+
 /**
  * Adopt an observed PR head as the run's expected commit (issue #61 recovery),
  * returning a new snapshot (the input is never mutated). After a follow-up push

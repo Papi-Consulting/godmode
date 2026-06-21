@@ -20,6 +20,7 @@ PR existence or a reviewer's claim.
 | Run-recorded expected commit + verification history | `RunSnapshot.expectedCommit` / `RunSnapshot.verifications`, `recordVerification` in `src/main/run.ts` |
 | IPC: run the gate and record it on the run | `godmode:run:verify` (`handleVerifyRun`) in `src/main/index.ts` |
 | Observed-head drift trigger (pure) | `observedHeadDrifted`, `latestRunVerification`, `adoptExpectedCommit` in `src/main/run.ts` |
+| Observed bound-PR head selection (pure, #61) | `selectObservedBoundPrHead` in `src/main/run.ts` (pull-list match by `run.prNumber`, then active PR) |
 | Observed-head reconciliation + adopt-head recovery (#61) | `reconcileObservedHead`, `handleAdoptHead` (`godmode:run:head:adopt`), pushed `godmode:run:verification:changed` in `src/main/index.ts` |
 | Pure PR-candidate matching + ambiguity decision (#38) | `matchPrCandidates`, `referencesIssue`, `selectPrCandidate` in `src/main/discovery.ts` |
 | Impure PR discovery fetch (`gh pr list`, #38) | `discoverRunPrCandidates` in `src/main/github.ts` |
@@ -127,8 +128,7 @@ run, the gate still runs (branch + local HEAD) but records nothing.
 
 A green verification for commit A must not keep reading as `verified` after the
 bound PR moves to commit B. Whenever GodMode **observes** the bound PR head from
-GitHub — a GitHub-pane refresh (`fetchActivePr` now requests `headRefOid` and
-surfaces it as `headSha`), an on-demand discovery pass, or the builder-exit
+GitHub — a GitHub-pane refresh, an on-demand discovery pass, or the builder-exit
 discovery pass — `reconcileObservedHead` compares the observed head against the
 run's latest recorded `verifiedHeadSha` via the pure `observedHeadDrifted`
 trigger. On drift it re-runs the gate live against the run's recorded expected
@@ -138,6 +138,23 @@ without waiting for a manual re-verify, reviewer launch, or synthesis. The
 reconcile is a no-op unless a bound run actually drifted and is capture-and-recheck
 guarded against a mid-flight project/run switch, so it is safe to run on every
 observation.
+
+### Selecting the observed bound-PR head (worktree-isolated runs)
+
+A GitHub-pane refresh must observe the **bound run's** PR head, which is not always
+the head of the current-branch *active* PR. The active PR is resolved from the
+**primary checkout's** current branch (`fetchActivePr`), but a worktree-isolated
+run (issue #41) keeps its PR branch in the run worktree while the primary checkout
+stays on its own branch — so the active PR is a different PR (or none) and never
+observes the bound head. To close that gap, the repo-wide pull list now carries
+each PR's head: `fetchPulls` requests `headRefOid` and `GithubPullRequest.headSha`
+surfaces it. The pure `selectObservedBoundPrHead` (`src/main/run.ts`) then picks
+the head to reconcile — preferring the pull-list entry matching `run.prNumber`
+(works regardless of checkout branch), falling back to the current-branch active PR
+when the run is unbound. `handleGetGithub` feeds that selection into
+`reconcileObservedHead`, so a moved bound-PR head stales the displayed evidence on
+refresh for **both** shared-checkout and worktree-isolated runs. (The active PR
+also requests `headRefOid`/`headSha` for the shared-checkout path.)
 
 ### Adopt-head recovery
 

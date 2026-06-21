@@ -53,6 +53,7 @@ import {
   getCurrentRun,
   isTerminalStatus,
   observedHeadDrifted,
+  selectObservedBoundPrHead,
   recordCurrentRunPrompt,
   recordCurrentRunVerification,
   selectIssueRun,
@@ -375,8 +376,15 @@ async function handleGetGithub() {
   // longer matches the run's latest recorded verification, re-derive verification
   // now (it becomes `stale_head` against the old expected commit) so the pane
   // stales without waiting for a manual re-verify, reviewer launch, or synthesis.
-  if (state.activePr) {
-    void reconcileObservedHead(root, state.activePr.number, state.activePr.headSha);
+  //
+  // The bound PR head is selected from the repo-wide pull list when the run is
+  // bound, falling back to the current-branch active PR. This is what makes the
+  // path work for worktree-isolated runs (issue #41): their PR branch lives in the
+  // run worktree, so the primary checkout's active PR never observes the bound head
+  // — only the pull-list match (by `run.prNumber`) does.
+  const observed = selectObservedBoundPrHead(state, getCurrentRun()?.prNumber);
+  if (observed) {
+    void reconcileObservedHead(root, observed.number, observed.headSha);
   }
   return state;
 }
