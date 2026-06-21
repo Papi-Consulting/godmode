@@ -154,6 +154,34 @@ test('merge-ready gate is blocked when PR verification is not verified', () => {
   assert.match(merge.reasons.join(' '), /checks_failed/);
 });
 
+test('stale_head verification cannot produce merge_ready even with both reviewers passing (issue #61)', () => {
+  // The expected commit is still in PR history but the head moved on. Both
+  // reviewers cleared, but the evidence is for an old head — the gate must hold.
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const staleHead = {
+    status: 'stale_head',
+    currentHeadVerified: false,
+    pr: { number: 42, headSha: 'b'.repeat(40), headShaShort: 'bbbbbbb' },
+  };
+  const merge = computeMergeReadiness({ results, verification: staleHead });
+  assert.equal(merge.mergeReady, false);
+  assert.equal(merge.prVerified, false);
+  assert.equal(merge.recommendation, 'hold');
+  assert.match(merge.reasons.join(' '), /stale_head/);
+});
+
+test('verified status but currentHeadVerified=false is rejected by the gate (issue #61 invariant guard)', () => {
+  // Defense in depth: even if a status read "verified", an explicit
+  // currentHeadVerified=false must block merge-readiness.
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const merge = computeMergeReadiness({
+    results,
+    verification: { status: 'verified', currentHeadVerified: false, pr: { number: 42 } },
+  });
+  assert.equal(merge.mergeReady, false);
+  assert.equal(merge.prVerified, false);
+});
+
 test('a reviewer self-report alone (no verification) is never merge-ready', () => {
   const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
   const merge = computeMergeReadiness({ results, verification: null });

@@ -66,6 +66,7 @@ test('verified when the expected commit is on the PR and checks pass', () => {
   assert.equal(v.status, 'verified');
   assert.equal(v.commitInList, true);
   assert.equal(v.matchesHead, true);
+  assert.equal(v.currentHeadVerified, true);
   assert.equal(v.prState, 'OPEN');
   assert.equal(v.mergeConfirmed, false);
   assert.equal(v.partial, false);
@@ -74,13 +75,42 @@ test('verified when the expected commit is on the PR and checks pass', () => {
   assert.equal(v.fetchedAt, NOW);
 });
 
-test('verified via commit list even when it is not the remote head', () => {
+test('stale_head when the expected commit is in PR history but no longer the head (issue #61)', () => {
   // Expected commit is in the list but the remote head moved on (newer commit).
+  // Presence in history must NOT be treated as current-head verification: this is
+  // the regression guard for stale evidence gating reviewer launch/merge-ready.
   const pr = prWith({ headSha: OTHER, commits: [OTHER, HEAD] });
   const v = deriveVerification(evidence({ pr }), NOW);
   assert.equal(v.commitInList, true);
   assert.equal(v.matchesHead, false);
+  assert.equal(v.status, 'stale_head');
+  // The invariant: history presence is not current-head evidence.
+  assert.equal(v.currentHeadVerified, false);
+  // The message names both SHAs so an operator sees exactly what drifted.
+  assert.match(v.message, /history/);
+  assert.match(v.message, /bbbbbbb/);
+});
+
+test('stale_head takes precedence over passing checks on the moved head', () => {
+  // Even if the (new-head) checks are green, an old expected commit that is no
+  // longer the head cannot read as verified — the head was never verified.
+  const pr = prWith({
+    headSha: OTHER,
+    commits: [OTHER, HEAD],
+    checks: [{ name: 'build', conclusion: 'SUCCESS' }],
+  });
+  const v = deriveVerification(evidence({ pr }), NOW);
+  assert.equal(v.status, 'stale_head');
+  assert.equal(v.currentHeadVerified, false);
+});
+
+test('merged PR with the expected commit only in history is still verified (head freshness moot)', () => {
+  // Once merged, the head-drift concern is terminal: the merge confirms the code.
+  const pr = prWith({ state: 'MERGED', headSha: OTHER, commits: [OTHER, HEAD] });
+  const v = deriveVerification(evidence({ pr }), NOW);
   assert.equal(v.status, 'verified');
+  assert.equal(v.mergeConfirmed, true);
+  assert.equal(v.currentHeadVerified, true);
 });
 
 test('missing_remote_commit when the expected commit is absent from the PR', () => {

@@ -1438,7 +1438,11 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
   }
 
   let updated = recordCurrentRunVerification(verification) ?? run;
-  if (verification.status !== 'verified' || !verification.pr) {
+  // Issue #61: reviewers may only launch against current-head evidence. A
+  // `stale_head` result (the expected commit is still in PR history but the head
+  // moved on) is not `verified`, and `currentHeadVerified` is required explicitly
+  // so presence-in-history can never gate a launch after a newer head appears.
+  if (verification.status !== 'verified' || !verification.pr || !verification.currentHeadVerified) {
     emitRunChanged(updated);
     return { ok: false, code: 'not_verified', error: verification.message, run: updated, verification };
   }

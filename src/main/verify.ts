@@ -119,8 +119,16 @@ function commitInCommitList(expected: string, commits: string[]): boolean {
  * 4. `missing_remote_commit` — a PR exists but the expected commit is absent.
  * 5. `needs_human` — the PR was closed without merging (a stop-and-ask state).
  * 6. `verified` — the PR is confirmed merged (checks are moot post-merge).
- * 7. `checks_failed` / `checks_pending` — commit matched, checks block/pending.
- * 8. `verified` — commit present on the remote PR and checks are clear.
+ * 7. `stale_head` — the expected commit is in the PR commit list but the PR head
+ *    moved on (a newer commit was pushed). Issue #61: presence in history is not
+ *    proof the current head was reviewed/merge-ready, so this never clears a gate.
+ * 8. `checks_failed` / `checks_pending` — commit IS the head, checks block/pending.
+ * 9. `verified` — the expected commit is the current PR head and checks are clear.
+ *
+ * Invariant (issue #61): `currentHeadVerified` is true exactly when the evidence
+ * is about the current PR head — `matchesHead` on an open PR, or a confirmed
+ * merge. A `verified` status therefore always implies `currentHeadVerified`; a
+ * `stale_head` status always implies `commitInList && !matchesHead`.
  */
 export function deriveVerification(
   evidence: VerificationEvidence,
@@ -132,6 +140,11 @@ export function deriveVerification(
   const matchesHead = pr && expectedCommit ? commitMatches(expectedCommit, pr.headSha) : false;
   const prState = pr ? pr.state : null;
   const mergeConfirmed = prState === 'MERGED';
+  // Issue #61: evidence is "current head" only when the expected commit IS the
+  // remote head, or the PR is confirmed merged (a terminal state). Mere presence
+  // in the commit list (an old commit still in PR history) is explicitly NOT
+  // current-head evidence and must never gate review/merge.
+  const currentHeadVerified = mergeConfirmed || matchesHead;
 
   const base: Omit<CommitVerification, 'status' | 'message'> = {
     branch,
@@ -150,6 +163,7 @@ export function deriveVerification(
       : null,
     commitInList,
     matchesHead,
+    currentHeadVerified,
     checks,
     prState,
     mergeConfirmed,
@@ -196,6 +210,19 @@ export function deriveVerification(
 
   if (mergeConfirmed) {
     return result('verified', `Commit ${shortSha(expectedCommit)} is on PR #${pr.number}, confirmed merged by GitHub.`);
+  }
+
+  // Issue #61: the expected commit is in the PR commit list (matched above) but it
+  // is NOT the current remote head — a newer commit was pushed. Presence in PR
+  // history proves the commit was pushed, NOT that reviewers reviewed the current
+  // head or that merge-ready applies to the latest code, so this is its own status
+  // and never clears a review/merge gate. Re-record the new head and re-verify.
+  if (!matchesHead) {
+    return result(
+      'stale_head',
+      `Commit ${shortSha(expectedCommit)} is in PR #${pr.number}'s history but the head moved to ${pr.headSha.slice(0, MIN_SHA_PREFIX)}. ` +
+        'A newer commit was pushed — re-verify the current head before reviewer launch or merge.',
+    );
   }
 
   if (checks.failing > 0) {

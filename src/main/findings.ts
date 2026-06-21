@@ -423,7 +423,13 @@ export function computeMergeReadiness(input: MergeReadinessInput): MergeReadines
   const reviewerA = gateFor('reviewer_a', usable.find((r) => r.paneId === 'reviewer_a'));
   const reviewerB = gateFor('reviewer_b', usable.find((r) => r.paneId === 'reviewer_b'));
 
-  const prVerified = verification?.status === 'verified';
+  // Issue #61: merge-readiness requires current-head evidence. `verified` already
+  // implies `currentHeadVerified` (an open PR only verifies when the expected
+  // commit IS the head, or the PR merged), but require the flag explicitly so a
+  // `stale_head` result — the expected commit still in PR history after the head
+  // moved — can never satisfy the gate. `currentHeadVerified` defaults to true
+  // when absent so pre-#61 verification fixtures/callers keep their behavior.
+  const prVerified = verification?.status === 'verified' && verification.currentHeadVerified !== false;
   const totalAcceptedBlockers = acceptedBlockers(usable).length;
   const noAcceptedBlockers = totalAcceptedBlockers === 0;
   const anyAmbiguous = usable.some((r) => r.status === 'ambiguous');

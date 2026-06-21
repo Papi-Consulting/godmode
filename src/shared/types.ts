@@ -387,6 +387,12 @@ export type GithubRepo = {
  *   the operator should retry rather than trust a partial result.
  * - `checks_pending`: the commit matched but PR checks are still running.
  * - `checks_failed`: the commit matched but one or more PR checks failed.
+ * - `stale_head`: the expected commit is still present in the PR's commit list
+ *   but it is no longer the PR head — the head moved on (a newer commit was
+ *   pushed) since this commit. Mere presence in PR history does NOT prove the
+ *   current head was reviewed/merge-ready, so this is deliberately distinct from
+ *   `verified` and never clears a review/merge gate. Re-record the new head
+ *   commit and re-verify to clear it (issue #61).
  * - `needs_human`: an ambiguous/blocking condition that needs a person — no
  *   commit could be resolved, or the PR was closed without merging.
  */
@@ -397,6 +403,7 @@ export type CommitVerificationStatus =
   | 'needs_refresh'
   | 'checks_pending'
   | 'checks_failed'
+  | 'stale_head'
   | 'needs_human';
 
 /** Bucketed counts of a PR's normalized checks, for a compact status display. */
@@ -446,6 +453,17 @@ export type CommitVerification = {
   commitInList: boolean;
   /** True when the expected commit equals the remote PR head commit. */
   matchesHead: boolean;
+  /**
+   * True only when this evidence corresponds to the **current PR head** — i.e.
+   * the expected commit equals the remote head (`matchesHead`) or the PR is
+   * confirmed merged (a terminal state where head freshness is moot). Issue #61:
+   * a commit that is merely still present somewhere in the PR commit list
+   * (`commitInList` without `matchesHead`) proves it was pushed, NOT that the
+   * current head was reviewed/merge-ready. Review/merge gates consume this flag,
+   * never bare `commitInList`, so stale evidence for an old head cannot gate
+   * reviewer launch, synthesis, or a `merge_ready` transition.
+   */
+  currentHeadVerified: boolean;
   checks: CommitCheckSummary;
   /** PR merge/close state confirmed from GitHub: OPEN, MERGED, CLOSED, or null. */
   prState: string | null;
@@ -755,6 +773,20 @@ export type RunVerificationLogEntry = {
   prNumber?: number;
   /** PR state confirmed from GitHub (OPEN/MERGED/CLOSED), when a PR was found. */
   prState?: string;
+  /**
+   * Remote PR head SHA this verification was computed against (issue #61), when a
+   * PR was found. Recording the observed head with each result lets a later pass
+   * detect head drift — a newly observed head that differs from the latest
+   * recorded verification's head means the old evidence is stale.
+   */
+  verifiedHeadSha?: string;
+  /**
+   * True when this recorded result corresponds to the current PR head (issue #61):
+   * a mirror of {@link CommitVerification.currentHeadVerified}. A `true` here is
+   * the only verification evidence a merge-ready decision may consume; a result
+   * that was merely `commitInList` for an old head records `false`.
+   */
+  currentHeadVerified?: boolean;
   /** Single-line human summary mirroring {@link CommitVerification.message}. */
   summary: string;
 };

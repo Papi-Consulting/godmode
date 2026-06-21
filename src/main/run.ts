@@ -537,6 +537,11 @@ export function recordVerification(run: RunSnapshot, verification: CommitVerific
     source: verification.expectedCommitSource,
     prNumber: verification.pr?.number,
     prState: verification.pr?.state,
+    // Issue #61: record the observed PR head this result was computed against and
+    // whether it corresponds to the current head, so a later pass can detect head
+    // drift and a merge-ready decision only consumes current-head evidence.
+    verifiedHeadSha: verification.pr?.headSha,
+    currentHeadVerified: verification.currentHeadVerified,
     summary: verification.message,
   };
   return { ...run, verifications: [...run.verifications, entry], updatedAt: verification.fetchedAt };

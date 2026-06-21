@@ -8,6 +8,8 @@ const STATUS_LABEL: Record<CommitVerificationStatus, string> = {
   needs_refresh: 'Needs refresh',
   checks_pending: 'Checks pending',
   checks_failed: 'Checks failed',
+  // Issue #61: the expected commit is still in PR history but the head moved on.
+  stale_head: 'Stale — head moved',
   needs_human: 'Needs human',
 };
 
@@ -18,7 +20,8 @@ const ERROR_STATUSES: ReadonlySet<CommitVerificationStatus> = new Set<CommitVeri
   'checks_failed',
   'needs_human',
 ]);
-// no_pr_for_branch, needs_refresh, checks_pending → warn (amber).
+// no_pr_for_branch, needs_refresh, checks_pending, stale_head → warn (amber): the
+// evidence is not current/complete but is recoverable by re-verifying the head.
 
 function statusTone(status: CommitVerificationStatus): string {
   if (SUCCESS_STATUSES.has(status)) return 'success';
@@ -109,13 +112,35 @@ export function VerificationPane({ verification, loading, hasRun, onVerify }: Ve
             </div>
             <div>
               <dt>Remote head</dt>
-              <dd>
+              <dd title={v.pr?.headSha ?? undefined}>
                 {v.pr ? v.pr.headShaShort : '—'}
                 {v.pr ? (
                   <span className={`verify-match ${v.matchesHead ? 'ok' : v.commitInList ? 'warn' : 'no'}`}>
-                    {v.matchesHead ? ' · matches head' : v.commitInList ? ' · in commit list' : ' · not present'}
+                    {v.matchesHead
+                      ? ' · matches head'
+                      : v.commitInList
+                        ? ' · stale — in history, not head'
+                        : ' · not present'}
                   </span>
                 ) : null}
+              </dd>
+            </div>
+            <div>
+              <dt>Current head verified</dt>
+              <dd>
+                {v.pr ? (
+                  <span className={`verify-match ${v.currentHeadVerified ? 'ok' : 'no'}`}>
+                    {v.currentHeadVerified
+                      ? v.mergeConfirmed
+                        ? 'yes · merged'
+                        : 'yes'
+                      : v.commitInList
+                        ? `no · head ${v.pr.headShaShort} not yet verified`
+                        : 'no'}
+                  </span>
+                ) : (
+                  '—'
+                )}
               </dd>
             </div>
           </dl>

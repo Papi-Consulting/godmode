@@ -542,6 +542,7 @@ function verification(overrides = {}) {
     pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'c'.repeat(40), headShaShort: 'ccccccc' },
     commitInList: true,
     matchesHead: true,
+    currentHeadVerified: true,
     checks: { total: 1, passing: 1, pending: 0, failing: 0 },
     prState: 'OPEN',
     mergeConfirmed: false,
@@ -562,8 +563,30 @@ test('recordVerification appends an audit entry without mutating the input', () 
   assert.equal(entry.source, 'run_recorded');
   assert.equal(entry.prNumber, 9);
   assert.equal(entry.prState, 'OPEN');
+  // Issue #61: the observed head and current-head flag are recorded so a later
+  // pass can detect head drift and merge gates consume only current-head evidence.
+  assert.equal(entry.verifiedHeadSha, 'c'.repeat(40));
+  assert.equal(entry.currentHeadVerified, true);
   assert.equal(entry.at, NOW);
   assert.equal(updated.updatedAt, NOW);
+});
+
+test('recordVerification records a stale-head result as not current-head verified (issue #61)', () => {
+  const run = createRun({ issueNumber: 9, now: NOW, id: 'run-stale' });
+  // The expected commit is in PR history but the head moved to a newer commit.
+  const stale = verification({
+    status: 'stale_head',
+    matchesHead: false,
+    currentHeadVerified: false,
+    pr: { number: 9, state: 'OPEN', url: 'u', headRefName: 'b', headSha: 'd'.repeat(40), headShaShort: 'ddddddd' },
+  });
+  const updated = recordVerification(run, stale);
+  const entry = updated.verifications[0];
+  assert.equal(entry.status, 'stale_head');
+  // The recorded head is the NEW head, and the entry is flagged not-current so a
+  // merge-ready decision can never consume it as current-head evidence.
+  assert.equal(entry.verifiedHeadSha, 'd'.repeat(40));
+  assert.equal(entry.currentHeadVerified, false);
 });
 
 test('recordCurrentRunVerification records against the live run, null when none', () => {
