@@ -154,6 +154,27 @@ test('an approved verdict that declares blocking>0 is malformed → ambiguous', 
   assert.match(outcomes[0].reason, /declares blocking=2/);
 });
 
+test('an approved blocking=0 verdict that embeds BLOCKING blocks is contradictory → ambiguous (B-1)', () => {
+  // Regression for PR #68 B-1: the marker declares approved/blocking=0 but the
+  // body lists a BLOCKING block. This contradiction must route to ambiguous,
+  // never a silent approved pass that could clear a reviewer gate.
+  const { outcomes } = parse([
+    verdictComment('reviewer_a', { status: 'approved', blocking: 0, blocks: blockingBlock('A-1') }),
+  ]);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'ambiguous');
+  assert.match(outcomes[0].reason, /contradicts itself with 1 BLOCKING block/);
+});
+
+test('an approved blocking=0 verdict embedding multiple BLOCKING blocks is contradictory → ambiguous (B-1)', () => {
+  const blocks = `${blockingBlock('A-1')}\n\n${blockingBlock('A-2')}`;
+  const { outcomes } = parse([
+    verdictComment('reviewer_a', { status: 'approved', blocking: 0, blocks }),
+  ]);
+  assert.equal(outcomes[0].kind, 'ambiguous');
+  assert.match(outcomes[0].reason, /contradicts itself with 2 BLOCKING block/);
+});
+
 test('a blocked verdict with no BLOCKING blocks is malformed → ambiguous', () => {
   const { outcomes } = parse([verdictComment('reviewer_a', { status: 'blocked', blocking: 1 })]);
   assert.equal(outcomes[0].kind, 'ambiguous');

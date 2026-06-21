@@ -620,8 +620,9 @@ type PaneAccumulator = {
  *    (stale-head);
  *  - otherwise it is attributed to the pane and validated. A current-head verdict
  *    that is malformed (missing/!numeric fields, unknown status, `approved` with
- *    `blocking>0`, or `blocked` with no `BLOCKING` blocks) routes that pane to
- *    **ambiguous**, never a silent pass;
+ *    `blocking>0`, `approved` that nonetheless embeds `BLOCKING` blocks, or
+ *    `blocked` with no `BLOCKING` blocks) routes that pane to **ambiguous**,
+ *    never a silent pass;
  *  - a pane with two or more current-head verdicts that disagree on status/count
  *    routes to **ambiguous** (duplicate-conflicting); agreeing duplicates collapse
  *    to one accepted verdict.
@@ -694,6 +695,17 @@ export function parseReviewerVerdictComments(input: ParseVerdictCommentsInput): 
     if (status === 'approved') {
       if (blockingValue !== 0) {
         acc.malformed.push(`approved verdict from ${author} declares blocking=${blockingValue}`);
+        continue;
+      }
+      // An approved verdict that nonetheless carries BLOCKING blocks contradicts
+      // itself (declared blocking=0 but lists blockers). Treat it as ambiguous
+      // rather than a silent pass, mirroring parseReviewerOutput's
+      // pass-with-blockers handling and the #60 contract.
+      const approvedBlocks = extractBlocks(lines);
+      if (approvedBlocks.length > 0) {
+        acc.malformed.push(
+          `approved verdict from ${author} contradicts itself with ${approvedBlocks.length} BLOCKING block(s)`,
+        );
         continue;
       }
       acc.valid.push({
