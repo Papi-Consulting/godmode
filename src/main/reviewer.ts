@@ -114,6 +114,39 @@ export function reviewerLaunchArgs(mode: AgentMode, prompt: string): string[] | 
   return mode === 'oneshot' ? [prompt] : undefined;
 }
 
+/** Inputs to {@link reviewerAttemptId}. */
+export type ReviewerAttemptIdInput = {
+  cycle: number;
+  /** Short (or full) PR head SHA the attempt targets. */
+  headShaShort: string;
+  reviewerId: string;
+  /** ISO launch timestamp; its digits make the id unique across same-head relaunches. */
+  launchedAt: string;
+};
+
+/**
+ * Compose a reviewer attempt's first-class id (issue #59):
+ * `<cycle>-<shortSha>-<reviewerId>-<timestamp>`. Every character outside
+ * `[A-Za-z0-9_-]` is mapped to `_` so the id is safe to embed directly in an
+ * artifact filename (the artifact layer re-confines it regardless). The timestamp
+ * digits keep an idempotent same-head relaunch distinct from the prior attempt, so
+ * two attempts for the same cycle+head never collide on one artifact path. Pure so
+ * the id shape is unit-tested away from Electron.
+ */
+export function reviewerAttemptId(input: ReviewerAttemptIdInput): string {
+  const sanitize = (value: string): string => {
+    const safe = value.replace(/[^A-Za-z0-9_-]/g, '_');
+    return safe.length > 0 ? safe : '_';
+  };
+  const stamp = input.launchedAt.replace(/[^0-9]/g, '');
+  return [
+    sanitize(String(input.cycle)),
+    sanitize(input.headShaShort),
+    sanitize(input.reviewerId),
+    sanitize(stamp),
+  ].join('-');
+}
+
 /**
  * The pointer-first required-reading block appended to each reviewer prompt. It
  * directs a FRESH reviewer to read the operated project's own sources and the

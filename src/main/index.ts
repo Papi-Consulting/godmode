@@ -80,18 +80,23 @@ import {
 import { composeFixHandoff, getCurrentHandoff, promptDigest } from './handoff.js';
 import {
   appendArtifact,
+  ensureReviewerArtifactDir,
   ensureRunArtifactDir,
+  readArtifactByRelPath,
   readReviewerArtifact,
-  reviewerArtifactPath,
   reviewerArtifactRelPath,
+  reviewerAttemptArtifactPath,
+  reviewerAttemptArtifactRelPath,
   writeRunFindings,
   writeRunSnapshot,
 } from './artifacts.js';
 import {
   acceptedBlockers,
   computeMergeReadiness,
+  currentHeadResults,
   parseReviewerOutput,
   renderBlockersText,
+  reviewerHeadEvidence,
 } from './findings.js';
 import {
   canPostReviewerMarker,
@@ -103,6 +108,7 @@ import {
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
+  reviewerAttemptId,
   reviewerCommentBody,
   reviewerLaunchArgs,
   reviewerLaunchTransition,
@@ -122,6 +128,7 @@ import type {
   PrDiscoveryResult,
   ReviewSynthesisResult,
   ReviewerCommentResult,
+  ReviewerHeadEvidence,
   ReviewerResult,
   RunDiscardResult,
   RunFindings,
@@ -1459,6 +1466,23 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
   }
 
   ensureRunArtifactDir(projectRoot, updated.id);
+  // Attempt-specific reviewer artifacts (issue #59) live in a per-run `reviewers/`
+  // subdir; ensure it exists before any capture write.
+  ensureReviewerArtifactDir(projectRoot, updated.id);
+
+  // First-class attempt identity per reviewer (issue #59). Every launch/relaunch
+  // is a fresh, auditable attempt tied to the PR head it reviews: the attempt id
+  // (`<cycle>-<shortSha>-<reviewerId>-<timestamp>`) makes its artifact path unique
+  // so a post-fix relaunch against a new head never overwrites a prior attempt,
+  // and `targetHeadSha` lets synthesis prove which head each attempt reviewed.
+  const headSha = verification.pr.headSha;
+  const headShaShort = verification.pr.headShaShort;
+  const attemptIds = new Map<AgentRole, string>(
+    plan.reviewers.map((reviewer) => [
+      reviewer.paneId,
+      reviewerAttemptId({ cycle: updated.cycle, headShaShort, reviewerId: reviewer.reviewerId, launchedAt: now }),
+    ]),
+  );
 
   // One fresh per-launch identity per reviewer, shared by the tracked record AND
   // that launch's PTY callbacks. An idempotent same-run relaunch installs new
@@ -1475,17 +1499,27 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
   // reviewers even when a subsequent launch fails.
   updated =
     setCurrentRunReviewers(
-      plan.reviewers.map((reviewer) => ({
-        reviewerId: reviewer.reviewerId,
-        paneId: reviewer.paneId,
-        sessionToken: launchTokens.get(reviewer.paneId) ?? randomUUID(),
-        displayName: reviewer.displayName,
-        roleDoc: reviewer.roleDoc,
-        status: 'launching' as const,
-        artifactPath: reviewerArtifactRelPath(updated.id, reviewer.reviewerId),
-        promptChars: reviewer.prompt.length,
-        commentPosted: false,
-      })),
+      plan.reviewers.map((reviewer) => {
+        const attemptId = attemptIds.get(reviewer.paneId) ?? randomUUID();
+        return {
+          reviewerId: reviewer.reviewerId,
+          paneId: reviewer.paneId,
+          attemptId,
+          cycle: updated.cycle,
+          prNumber: pr.number,
+          branch: pr.branch || undefined,
+          targetHeadSha: headSha,
+          targetHeadShaShort: headShaShort,
+          launchedAt: now,
+          sessionToken: launchTokens.get(reviewer.paneId) ?? randomUUID(),
+          displayName: reviewer.displayName,
+          roleDoc: reviewer.roleDoc,
+          status: 'launching' as const,
+          artifactPath: reviewerAttemptArtifactRelPath(updated.id, reviewer.reviewerId, attemptId),
+          promptChars: reviewer.prompt.length,
+          commentPosted: false,
+        };
+      }),
       now,
     ) ?? updated;
 
@@ -1499,8 +1533,11 @@ async function handleStartReviewers(actor: TransitionActor = 'operator'): Promis
       continue;
     }
 
-    const absArtifact = reviewerArtifactPath(projectRoot, updated.id, reviewer.reviewerId);
-    const relArtifact = reviewerArtifactRelPath(updated.id, reviewer.reviewerId);
+    // Capture to this attempt's own artifact (issue #59), so a relaunch never
+    // overwrites a prior attempt's evidence.
+    const attemptId = attemptIds.get(reviewer.paneId) ?? randomUUID();
+    const absArtifact = reviewerAttemptArtifactPath(projectRoot, updated.id, reviewer.reviewerId, attemptId);
+    const relArtifact = reviewerAttemptArtifactRelPath(updated.id, reviewer.reviewerId, attemptId);
     // A one-shot reviewer reads its prompt and exits, so deliver the prompt as a
     // launch argument (present at spawn) rather than writing it into the PTY
     // afterward, which could no-op against an already-exited process and lose the
@@ -1603,20 +1640,27 @@ function handlePostReviewerComment(
 }
 
 /**
- * Parse each tracked reviewer's captured output into a normalized result. A
- * reviewer whose artifact is absent/unreadable (e.g. a launch failure) parses to
- * an ambiguous "no output captured" result rather than being skipped, so it can
- * never silently clear the merge gate.
+ * Parse each tracked reviewer's captured output into a normalized result. Reads
+ * from the session's own **attempt-specific** artifact path (issue #59), so a
+ * post-fix relaunch's synthesis parses the new attempt's file rather than a single
+ * reusable per-reviewer path that an earlier attempt would have written. A session
+ * recorded before #59 (no `artifactPath`) falls back to the legacy per-reviewer
+ * path. A reviewer whose artifact is absent/unreadable (e.g. a launch failure)
+ * parses to an ambiguous "no output captured" result rather than being skipped, so
+ * it can never silently clear the merge gate.
  */
 function parseReviewerResults(run: RunSnapshot, projectRoot: string): ReviewerResult[] {
   const reviewers = run.reviewers ?? [];
-  return reviewers.map((session) =>
-    parseReviewerOutput({
+  return reviewers.map((session) => {
+    const text = session.artifactPath
+      ? readArtifactByRelPath(projectRoot, session.artifactPath)
+      : readReviewerArtifact(projectRoot, run.id, session.reviewerId);
+    return parseReviewerOutput({
       reviewerId: session.reviewerId,
       paneId: session.paneId,
-      text: readReviewerArtifact(projectRoot, run.id, session.reviewerId) ?? '',
-    }),
-  );
+      text: text ?? '',
+    });
+  });
 }
 
 /**
@@ -1708,9 +1752,24 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
 
   let updated = recordCurrentRunVerification(verification) ?? run;
 
+  // Current-head gating (issue #59): the merge gate consumes ONLY reviewer
+  // attempts whose `targetHeadSha` equals the freshly verified PR head AND that
+  // completed. A reviewer attempt against a previous head (a re-review never ran
+  // after a fix push) is stale evidence — it cannot clear the gate, and synthesis
+  // holds/needs-human until a fresh attempt for the current head exists. Build the
+  // per-reviewer evidence from the tracked sessions, then feed it to the gate so a
+  // stale attempt is dropped and explained, never read as current approval.
+  const currentHeadSha = verification.pr?.headSha ?? null;
+  const currentHeadShaShort = verification.pr?.headShaShort ?? null;
+  const reviewerHeads: ReviewerHeadEvidence[] = (updated.reviewers ?? []).map((session) =>
+    reviewerHeadEvidence(session, currentHeadSha),
+  );
+
   const results = parseReviewerResults(updated, projectRoot);
-  const merge = computeMergeReadiness({ results, verification });
-  const blockers = acceptedBlockers(results);
+  const merge = computeMergeReadiness({ results, verification, reviewerHeads, currentHeadShaShort });
+  // Only blockers from completed, current-head reviewer attempts open a fix cycle —
+  // a stale attempt's blockers are evidence about an old head, not the new one.
+  const blockers = acceptedBlockers(currentHeadResults(results, reviewerHeads));
   const findings: RunFindings = {
     runId: updated.id,
     cycle: updated.cycle,
@@ -1718,6 +1777,9 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
     merge,
     acceptedBlockers: blockers,
     prUrl: verification.pr?.url,
+    prHeadSha: currentHeadSha ?? undefined,
+    prHeadShaShort: currentHeadShaShort ?? undefined,
+    reviewerHeads,
     fetchedAt: now,
   };
   // Mirror to disk (best-effort) and attach to the run for the dashboard.

@@ -17,6 +17,7 @@ import {
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
+  reviewerAttemptId,
   reviewerCommentBody,
   reviewerLaunchArgs,
   reviewerLaunchTransition,
@@ -365,4 +366,35 @@ test('isLoopReviewSynthesisPreempted: a generation bump preempts synthesis insid
   // The status guard still preempts a stop transition with no generation bump.
   assert.equal(isLoopReviewSynthesisPreempted('paused', false), true);
   assert.equal(isLoopReviewSynthesisPreempted(null, false), true);
+});
+
+// --- Reviewer attempt identity (issue #59) -----------------------------------
+
+test('reviewerAttemptId composes <cycle>-<shortSha>-<reviewerId>-<timestamp>', () => {
+  const id = reviewerAttemptId({
+    cycle: 2,
+    headShaShort: 'abc1234',
+    reviewerId: 'reviewer-a',
+    launchedAt: '2026-06-20T10:11:12.000Z',
+  });
+  assert.equal(id, '2-abc1234-reviewer-a-20260620101112000');
+});
+
+test('reviewerAttemptId is distinct across same-head relaunches (timestamp varies)', () => {
+  const base = { cycle: 1, headShaShort: 'deadbee', reviewerId: 'reviewer-b' };
+  const first = reviewerAttemptId({ ...base, launchedAt: '2026-06-20T10:00:00.000Z' });
+  const second = reviewerAttemptId({ ...base, launchedAt: '2026-06-20T10:05:00.000Z' });
+  assert.notEqual(first, second, 'a relaunch for the same cycle+head is still a distinct attempt');
+});
+
+test('reviewerAttemptId sanitizes unsafe characters so it is filename-safe', () => {
+  const id = reviewerAttemptId({
+    cycle: 1,
+    headShaShort: 'ab/cd',
+    reviewerId: '../evil',
+    launchedAt: '2026-06-20T00:00:00.000Z',
+  });
+  assert.ok(!id.includes('/'), 'no path separators');
+  assert.ok(!id.includes('..'), 'no parent-dir segments');
+  assert.match(id, /^[A-Za-z0-9_-]+$/);
 });

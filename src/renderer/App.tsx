@@ -757,6 +757,8 @@ export function App() {
                 run={run}
                 startError={startReviewersError}
                 starting={startingReviewers}
+                currentHeadSha={verification?.pr?.headSha ?? null}
+                currentHeadShaShort={verification?.pr?.headShaShort ?? null}
                 onStart={startReviewers}
                 onPostComment={postReviewerComment}
               />

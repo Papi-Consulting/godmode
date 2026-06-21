@@ -40,6 +40,15 @@ type ReviewLaunchPaneProps = {
   /** Most recent start rejection (e.g. not_verified), surfaced inline. */
   startError: string | null;
   starting: boolean;
+  /**
+   * Full SHA of the current verified PR head (issue #59), from the latest live #9
+   * verification. A reviewer attempt whose `targetHeadSha` differs from this is
+   * labeled stale — it reviewed an older commit, so it is not current evidence.
+   * Null when no verification has been run, in which case staleness is not shown.
+   */
+  currentHeadSha: string | null;
+  /** 7-char form of {@link currentHeadSha} for the stale label. */
+  currentHeadShaShort: string | null;
   /** Launch both configured reviewers from the verified PR. */
   onStart: () => void;
   /** Operator override / re-post for one reviewer's marker comment. */
@@ -55,7 +64,24 @@ type ReviewLaunchPaneProps = {
  * plain PR existence is never enough. Until reviewers are actually launched the
  * pane is clearly a pre-launch preview, never confused with real reviewer state.
  */
-export function ReviewLaunchPane({ run, startError, starting, onStart, onPostComment }: ReviewLaunchPaneProps) {
+/**
+ * Whether a reviewer attempt is stale relative to the current verified PR head
+ * (issue #59): it targeted a head SHA that differs from the live one. Only
+ * decidable when both the attempt's head and the current head are known.
+ */
+function isAttemptStale(session: ReviewerSessionState, currentHeadSha: string | null): boolean {
+  return currentHeadSha !== null && Boolean(session.targetHeadSha) && session.targetHeadSha !== currentHeadSha;
+}
+
+export function ReviewLaunchPane({
+  run,
+  startError,
+  starting,
+  currentHeadSha,
+  currentHeadShaShort,
+  onStart,
+  onPostComment,
+}: ReviewLaunchPaneProps) {
   const reviewers: ReviewerSessionState[] = run?.reviewers ?? [];
   const canStart = run !== null && STARTABLE_RUN_STATUSES.includes(run.status);
   const relaunch = run !== null && RELAUNCH_RUN_STATUSES.includes(run.status);
@@ -84,13 +110,28 @@ export function ReviewLaunchPane({ run, startError, starting, onStart, onPostCom
         </p>
       ) : (
         <ul className="reviewer-list" aria-label="Reviewer sessions">
-          {reviewers.map((reviewer) => (
-            <li key={reviewer.paneId} className={`reviewer-row ${statusTone(reviewer.status)}`}>
+          {reviewers.map((reviewer) => {
+            const stale = isAttemptStale(reviewer, currentHeadSha);
+            return (
+            <li key={reviewer.paneId} className={`reviewer-row ${stale ? 'warn' : statusTone(reviewer.status)}`}>
               <div className="reviewer-row-head">
                 <span className="command-agent">{reviewer.displayName}</span>
                 <span className="command-tag">{reviewer.reviewerId}</span>
                 <span className={`header-chip ${statusTone(reviewer.status)}`}>{STATUS_LABEL[reviewer.status]}</span>
+                {stale ? (
+                  <span className="header-chip warn" role="status" title="This attempt reviewed an older PR head.">
+                    stale
+                  </span>
+                ) : null}
               </div>
+              {/* Attempt identity (issue #59): cycle + target short SHA so the
+                  operator can tell which PR head each attempt reviewed. */}
+              {reviewer.targetHeadShaShort ? (
+                <span className="reviewer-attempt-meta run-hint">
+                  attempt · cycle {reviewer.cycle ?? '—'} · head {reviewer.targetHeadShaShort}
+                  {stale && currentHeadShaShort ? ` · current head ${currentHeadShaShort}` : ''}
+                </span>
+              ) : null}
               {reviewer.artifactPath ? (
                 <code className="reviewer-artifact" title={reviewer.artifactPath}>
                   {reviewer.artifactPath}
@@ -140,7 +181,8 @@ export function ReviewLaunchPane({ run, startError, starting, onStart, onPostCom
                 </div>
               ) : null}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 

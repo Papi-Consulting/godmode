@@ -3,6 +3,7 @@ import type {
   MergeRecommendation,
   ReviewerFinding,
   ReviewerGateState,
+  ReviewerHeadEvidence,
   ReviewerResultStatus,
   RunSnapshot,
 } from '../../shared/types.js';
@@ -37,12 +38,28 @@ function reviewerTone(status: ReviewerResultStatus): string {
   return '';
 }
 
-function gateRow(label: string, gate: ReviewerGateState | null) {
+/**
+ * One reviewer's merge-gate row. With issue #59 the row also surfaces the attempt
+ * head the reviewer evaluated and labels it **stale** when that attempt did not
+ * target the current PR head — so an old attempt is never read as current.
+ */
+function gateRow(label: string, gate: ReviewerGateState | null, head: ReviewerHeadEvidence | undefined) {
+  const stale = head !== undefined && !(head.current && head.completed);
+  const attemptMeta =
+    head?.attemptHeadShaShort !== undefined ? (
+      <span className="reviewer-attempt-meta run-hint">
+        attempt head {head.attemptHeadShaShort}
+        {head.cycle !== undefined ? ` · cycle ${head.cycle}` : ''}
+      </span>
+    ) : null;
   if (!gate) {
     return (
       <div>
         <dt>{label}</dt>
-        <dd className="empty-line">no result</dd>
+        <dd>
+          {stale ? <span className="header-chip warn">stale</span> : <span className="empty-line">no result</span>}
+          {attemptMeta}
+        </dd>
       </div>
     );
   }
@@ -52,6 +69,8 @@ function gateRow(label: string, gate: ReviewerGateState | null) {
       <dd>
         <span className={`header-chip ${reviewerTone(gate.status)}`}>{REVIEWER_STATUS_LABEL[gate.status]}</span>
         {gate.acceptedBlockers > 0 ? <span className="run-action-name"> · {gate.acceptedBlockers} blocking</span> : null}
+        {stale ? <span className="header-chip warn"> stale</span> : null}
+        {attemptMeta}
       </dd>
     </div>
   );
@@ -111,6 +130,11 @@ export function ReviewSynthesisPane({
 }: ReviewSynthesisPaneProps) {
   const findings = run?.findings ?? null;
   const merge = findings?.merge ?? null;
+  // Per-reviewer current-head evidence (issue #59), keyed by pane so each gate row
+  // can show its attempt head and a stale label.
+  const headByPane = new Map<string, ReviewerHeadEvidence>(
+    (findings?.reviewerHeads ?? merge?.reviewerHeads ?? []).map((head) => [head.paneId, head]),
+  );
   const canSynthesize = run !== null && SYNTHESIZE_RUN_STATUSES.includes(run.status);
   const inFixCycle = run?.status === 'builder_fixing';
   const blockers = findings?.acceptedBlockers ?? [];
@@ -140,8 +164,8 @@ export function ReviewSynthesisPane({
       ) : (
         <>
           <dl className="run-state-grid" aria-label="Merge gate">
-            {gateRow('Reviewer A', merge?.reviewerA ?? null)}
-            {gateRow('Reviewer B', merge?.reviewerB ?? null)}
+            {gateRow('Reviewer A', merge?.reviewerA ?? null, headByPane.get('reviewer_a'))}
+            {gateRow('Reviewer B', merge?.reviewerB ?? null, headByPane.get('reviewer_b'))}
             <div>
               <dt>PR verified</dt>
               <dd>
@@ -149,6 +173,12 @@ export function ReviewSynthesisPane({
                   {merge?.prVerified ? 'verified' : 'not verified'}
                 </span>
               </dd>
+            </div>
+            {/* The PR head this synthesis was computed against (issue #59): the
+                gate consumed only reviewer attempts targeting this head. */}
+            <div>
+              <dt>PR head</dt>
+              <dd>{findings.prHeadShaShort ?? merge?.prHeadShaShort ?? '—'}</dd>
             </div>
             <div>
               <dt>Cycle</dt>

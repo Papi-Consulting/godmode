@@ -120,13 +120,47 @@ stays in config (default + per-project), not core code, so the harness never
 hardcodes a vendor's exec syntax.
 
 The session's `onData` both streams to the renderer (`godmode:pty:data`, so the
-reviewer pane shows it) and appends to `.godmode/runs/<run-id>/<reviewer-id>.log`.
-Capture never throws into the data callback, but a capture *failure* is **not**
-swallowed: `appendArtifact` returns whether the write succeeded, and the first
-failed write flips the reviewer to `failed` with a visible reason. The reviewer-id
-segment is sanitized to a single safe path component (config only guarantees a
-slug — see the schema regex — but the path layer confines it regardless), so a bad
-id can never escape the run dir. `.godmode/runs/` is gitignored.
+reviewer pane shows it) and appends to the attempt's own artifact,
+`.godmode/runs/<run-id>/reviewers/<reviewer-id>-<attempt-id>.log` (issue #59 —
+see "Reviewer attempt identity" below). Capture never throws into the data
+callback, but a capture *failure* is **not** swallowed: `appendArtifact` returns
+whether the write succeeded, and the first failed write flips the reviewer to
+`failed` with a visible reason. The reviewer-id and attempt-id segments are each
+sanitized to a single safe path component (config only guarantees a slug — see the
+schema regex — but the path layer confines it regardless), so a bad id can never
+escape the run dir. `.godmode/runs/` is gitignored.
+
+## Reviewer attempt identity (issue #59)
+
+Every reviewer launch **and relaunch** is a fresh, auditable *attempt* tied to the
+PR head it reviewed, not a reusable per-reviewer slot. After the #9 gate passes,
+`handleStartReviewers` stamps each reviewer session with first-class identity on
+`ReviewerSessionState`:
+
+- `attemptId` — `<cycle>-<shortSha>-<reviewerId>-<timestamp>` (composed by the pure
+  `reviewerAttemptId` in `src/main/reviewer.ts`, sanitized to a filename-safe
+  slug). The timestamp keeps an idempotent same-cycle/same-head relaunch distinct
+  from the prior attempt;
+- `cycle` — the fix-loop cycle the attempt launched in;
+- `prNumber` / `branch` — the PR coordinates the attempt reviews;
+- `targetHeadSha` / `targetHeadShaShort` — the **remote PR head SHA** the attempt
+  reviews, read from the live #9 verification (`verification.pr.headSha`). This is
+  the evidence that ties the attempt to the exact code it saw;
+- `launchedAt` — the ISO launch timestamp.
+
+The artifact path embeds `attemptId`
+(`reviewerAttemptArtifactRelPath(runId, reviewerId, attemptId)` →
+`.godmode/runs/<run-id>/reviewers/<reviewer-id>-<attempt-id>.log`), so a post-fix
+relaunch against a new head writes a **new** file rather than overwriting the
+prior attempt's captured evidence. Old attempt artifacts stay readable for audit;
+the run snapshot's reviewer session simply points at the latest attempt's path
+(its own `artifactPath`), and synthesis reads exactly that file
+(`readArtifactByRelPath`) rather than recomputing a single per-reviewer path. The
+per-launch `sessionToken` stale-callback guard is unchanged — attempt identity
+complements it (durable, head-bound) rather than replacing it (opaque,
+per-launch). The reviewer launch pane shows each attempt's cycle and target short
+SHA, and labels an attempt **stale** when its `targetHeadSha` differs from the
+current verified PR head.
 
 Each reviewer is tracked on `RunSnapshot.reviewers` with an independent status:
 `launching → running → completed → comment_posted`, or `failed`. The state is set
@@ -201,10 +235,12 @@ completed, already-failed kept), `canPostReviewerMarker` (only a ran session is
 postable; failed/launching are not), `isReviewerRunContextStale` (run cleared,
 different run, or changed root across an await → stale), and
 `isReviewerSessionStale` (a same-run relaunch's fresh `sessionToken` across an
-await → stale). `test/artifacts.test.js`
-covers the artifact
-path/dir/append helpers over a
-temp dir, the captured-write success/failure return, and the reviewer-id
-path-confinement guard. `test/run.test.js` covers the reviewer-session reducers
-(immutability + lifecycle transitions). All are pure — no Electron, no real spawn,
-no `gh`. Run with `npm test`.
+await → stale), and `reviewerAttemptId` (the `<cycle>-<shortSha>-<reviewerId>-
+<timestamp>` shape, distinctness across same-head relaunches, and filename-safe
+sanitization — issue #59). `test/artifacts.test.js` covers the artifact
+path/dir/append helpers over a temp dir, the captured-write success/failure
+return, the reviewer-id path-confinement guard, and the attempt-specific helpers
+(`reviewerAttemptArtifact*`, `ensureReviewerArtifactDir`, `readArtifactByRelPath`
+including its run-dir-confinement refusal — issue #59). `test/run.test.js` covers
+the reviewer-session reducers (immutability + lifecycle transitions). All are pure
+— no Electron, no real spawn, no `gh`. Run with `npm test`.

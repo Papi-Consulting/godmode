@@ -17,7 +17,7 @@ PASS line is never enough to reach `merge_ready`.
 | Concern | Owner |
 | --- | --- |
 | Finding/result/merge-gate/findings types | `src/shared/types.ts` (`ReviewerFinding`, `ReviewerResult`, `MergeReadiness`, `RunFindings`, `ReviewSynthesisResult`) |
-| Pure parsing + merge gate + blocker text | `src/main/findings.ts` (`parseReviewerOutput`, `computeMergeReadiness`, `acceptedBlockers`, `renderBlockersText`) |
+| Pure parsing + merge gate + blocker text + current-head evidence | `src/main/findings.ts` (`parseReviewerOutput`, `computeMergeReadiness`, `acceptedBlockers`, `renderBlockersText`, `reviewerHeadEvidence`, `currentHeadResults`) |
 | Pointer-first fix handoff | `composeFixHandoff` in `src/main/handoff.ts` |
 | Findings persistence + reviewer-artifact read | `src/main/artifacts.ts` (`writeRunFindings`, `readReviewerArtifact`) |
 | Findings on the run snapshot | `setRunFindings` / `setCurrentRunFindings` in `src/main/run.ts` |
@@ -31,9 +31,11 @@ artifacts, re-runs #9, persists findings, and dispatches transitions.
 ## Parsing reviewer output
 
 `parseReviewerOutput` consumes one reviewer session's captured log (the local
-`.godmode/runs/<run-id>/<reviewer-id>.log` artifact from #10) and produces a
-`ReviewerResult` with status `pass` / `fail` / `ambiguous`. It recognizes the
-shapes the reviewer role docs and the product spec define:
+attempt-specific
+`.godmode/runs/<run-id>/reviewers/<reviewer-id>-<attempt-id>.log` artifact — issue
+#59, read by the session's recorded `artifactPath`) and produces a `ReviewerResult`
+with status `pass` / `fail` / `ambiguous`. It recognizes the shapes the reviewer
+role docs and the product spec define:
 
 - the completion marker `DONE: ROLE=reviewer STATUS=pass|fail BLOCKING=<count>`,
 - a reviewer `PASS` line (e.g. `Reviewer A: PASS — …`),
@@ -55,6 +57,22 @@ slice accepts clear blockers by default); on an `ambiguous` result they are
 marked `needs_human`, so ambiguous output never feeds accepted blockers into a
 fix cycle.
 
+## Current-head evidence gating (issue #59)
+
+Synthesis consumes **only** reviewer evidence for the PR head it is actually
+deciding about. After re-running the #9 gate it reads the live PR head SHA
+(`verification.pr.headSha`) and builds per-reviewer head evidence with the pure
+`reviewerHeadEvidence(session, currentHeadSha)`: a reviewer attempt is usable only
+when its `targetHeadSha` equals the current head **and** it reached a completed/
+parseable state (`completed` / `comment_posted`). `currentHeadResults` drops every
+other attempt, so a reviewer whose latest attempt reviewed a *previous* head — a
+re-review never ran after a fix push — or has not finished is treated as having no
+usable result. Both the merge gate and the accepted-blocker set are computed over
+the current-head subset, so a stale attempt's clear *or* its blockers never feed
+the decision for the new head. The synthesis records `prHeadSha`/`prHeadShaShort`
+and the `reviewerHeads` evidence on `RunFindings` for audit and the UI, which
+labels any stale attempt and shows the head being evaluated.
+
 ## The merge gate
 
 `computeMergeReadiness` is `merge_ready` only when **all** hold:
@@ -62,7 +80,12 @@ fix cycle.
 1. Reviewer A passed (or has zero accepted blocking findings) and is not ambiguous,
 2. Reviewer B likewise,
 3. the latest #9 commit verification is `verified`,
-4. no accepted blockers remain.
+4. no accepted blockers remain,
+5. every reviewer has a completed attempt for the **current** PR head (issue #59) —
+   a stale or unfinished attempt holds the gate (`hold`, "relaunch reviewers")
+   with an ordered reason naming the reviewer and the head it last reviewed, so an
+   old review can never read as current approval. When no head evidence is supplied
+   (pre-#59 callers/tests) the gate keeps its prior behavior.
 
 It returns an ordered `reasons[]` explaining any unmet condition and a
 `recommendation`:

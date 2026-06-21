@@ -31,9 +31,48 @@ export function runArtifactRelDir(runId: string): string {
   return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId));
 }
 
-/** `.godmode/runs/<run-id>/<reviewer-id>.log` — the captured-output artifact path. */
+/** `.godmode/runs/<run-id>/<reviewer-id>.log` — the legacy single-artifact path. */
 export function reviewerArtifactRelPath(runId: string, reviewerId: string): string {
   return path.posix.join('.godmode', 'runs', safeArtifactSegment(runId), `${safeArtifactSegment(reviewerId)}.log`);
+}
+
+/**
+ * `.godmode/runs/<run-id>/reviewers/<reviewer-id>-<attempt-id>.log` — the
+ * **attempt-specific** captured-output artifact path (issue #59). Each reviewer
+ * launch/relaunch gets a distinct attempt id, so a post-fix relaunch against a new
+ * PR head writes to a new file rather than overwriting the prior attempt's
+ * evidence. Both id segments are path-confined like every other artifact path, so
+ * a crafted reviewer id or attempt id can never escape the run dir.
+ */
+export function reviewerAttemptArtifactRelPath(runId: string, reviewerId: string, attemptId: string): string {
+  return path.posix.join(
+    '.godmode',
+    'runs',
+    safeArtifactSegment(runId),
+    'reviewers',
+    `${safeArtifactSegment(reviewerId)}-${safeArtifactSegment(attemptId)}.log`,
+  );
+}
+
+/** Absolute path to one reviewer **attempt's** captured-output log (issue #59). */
+export function reviewerAttemptArtifactPath(
+  projectRoot: string,
+  runId: string,
+  reviewerId: string,
+  attemptId: string,
+): string {
+  return path.resolve(projectRoot, reviewerAttemptArtifactRelPath(runId, reviewerId, attemptId));
+}
+
+/**
+ * Resolve and create the per-run `reviewers/` subdir holding attempt-specific
+ * reviewer artifacts (issue #59), returning its absolute path. `mkdir -p`
+ * semantics under the operated-project root.
+ */
+export function ensureReviewerArtifactDir(projectRoot: string, runId: string): string {
+  const dir = path.resolve(projectRoot, '.godmode', 'runs', safeArtifactSegment(runId), 'reviewers');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**
@@ -76,6 +115,28 @@ export function appendArtifact(absPath: string, data: string): boolean {
 export function readReviewerArtifact(projectRoot: string, runId: string, reviewerId: string): string | null {
   try {
     return fs.readFileSync(reviewerArtifactPath(projectRoot, runId, reviewerId), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a captured artifact by its **project-relative** path (issue #59). Reviewer
+ * sessions record their own attempt-specific `artifactPath`, so synthesis reads
+ * exactly the attempt's file rather than recomputing a single per-reviewer path
+ * (which would let a relaunch's parse pick up a prior attempt). The path is
+ * resolved under the operated-project root and confined to the run-artifact dir:
+ * a relative path that escapes `.godmode/runs/` (e.g. via `..`) reads as null
+ * rather than reaching outside it. Absent/unreadable files also return null, so a
+ * reviewer whose output was never captured parses to an ambiguous result.
+ */
+export function readArtifactByRelPath(projectRoot: string, relPath: string): string | null {
+  try {
+    const runsRoot = path.resolve(projectRoot, '.godmode', 'runs');
+    const abs = path.resolve(projectRoot, relPath);
+    const rel = path.relative(runsRoot, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    return fs.readFileSync(abs, 'utf8');
   } catch {
     return null;
   }

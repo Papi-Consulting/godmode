@@ -6,8 +6,10 @@ import { test } from 'node:test';
 import {
   acceptedBlockers,
   computeMergeReadiness,
+  currentHeadResults,
   parseReviewerOutput,
   renderBlockersText,
+  reviewerHeadEvidence,
 } from '../dist/main/findings.js';
 import { composeFixHandoff } from '../dist/main/handoff.js';
 import { DEFAULT_CONFIG } from '../dist/main/config.js';
@@ -197,6 +199,148 @@ test('a missing reviewer result holds the gate (not merge-ready)', () => {
   assert.equal(merge.mergeReady, false);
   assert.equal(merge.recommendation, 'hold');
   assert.match(merge.reasons.join(' '), /Reviewer B has not produced/);
+});
+
+// --- Current-head reviewer evidence (issue #59) ------------------------------
+
+const HEAD_A = 'aaaaaaa000';
+const HEAD_B = 'bbbbbbb111';
+
+/** A verified #9 verification stub carrying a resolvable PR head SHA. */
+function verifiedHead(headSha) {
+  return {
+    status: 'verified',
+    pr: { number: 42, url: 'https://github.com/x/y/pull/42', headRefName: 'fix', headSha, headShaShort: headSha.slice(0, 7) },
+  };
+}
+
+/** A tracked reviewer session stub (only the fields head-evidence reads). */
+function session(paneId, { status = 'completed', head = HEAD_A, cycle = 1 } = {}) {
+  const reviewerId = paneId === 'reviewer_a' ? 'reviewer-a' : 'reviewer-b';
+  return {
+    reviewerId,
+    paneId,
+    status,
+    cycle,
+    attemptId: `${cycle}-${head.slice(0, 7)}-${reviewerId}-1`,
+    targetHeadSha: head,
+    targetHeadShaShort: head.slice(0, 7),
+  };
+}
+
+test('reviewerHeadEvidence flags a current, completed attempt as usable evidence', () => {
+  const ev = reviewerHeadEvidence(session('reviewer_a', { head: HEAD_A, status: 'completed' }), HEAD_A);
+  assert.equal(ev.current, true);
+  assert.equal(ev.completed, true);
+  assert.equal(ev.attemptHeadShaShort, HEAD_A.slice(0, 7));
+});
+
+test('reviewerHeadEvidence flags an attempt from a previous head as not current', () => {
+  const ev = reviewerHeadEvidence(session('reviewer_a', { head: HEAD_A, status: 'completed' }), HEAD_B);
+  assert.equal(ev.current, false);
+  assert.equal(ev.completed, true);
+});
+
+test('reviewerHeadEvidence flags a still-running attempt as incomplete', () => {
+  const ev = reviewerHeadEvidence(session('reviewer_a', { head: HEAD_A, status: 'running' }), HEAD_A);
+  assert.equal(ev.current, true);
+  assert.equal(ev.completed, false);
+});
+
+test('currentHeadResults drops a reviewer whose attempt targeted a previous head', () => {
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const heads = [
+    reviewerHeadEvidence(session('reviewer_a', { head: HEAD_B }), HEAD_B), // current
+    reviewerHeadEvidence(session('reviewer_b', { head: HEAD_A }), HEAD_B), // stale
+  ];
+  const usable = currentHeadResults(results, heads);
+  assert.equal(usable.length, 1);
+  assert.equal(usable[0].paneId, 'reviewer_a');
+});
+
+test('merge gate: both reviewers current+completed for the head → merge_ready', () => {
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const reviewerHeads = [
+    reviewerHeadEvidence(session('reviewer_a', { head: HEAD_B }), HEAD_B),
+    reviewerHeadEvidence(session('reviewer_b', { head: HEAD_B }), HEAD_B),
+  ];
+  const merge = computeMergeReadiness({
+    results,
+    verification: verifiedHead(HEAD_B),
+    reviewerHeads,
+    currentHeadShaShort: HEAD_B.slice(0, 7),
+  });
+  assert.equal(merge.mergeReady, true);
+  assert.equal(merge.recommendation, 'merge_ready');
+  assert.equal(merge.prHeadShaShort, HEAD_B.slice(0, 7));
+});
+
+test('merge gate: a stale reviewer attempt cannot reach merge_ready (holds, explains which/head)', () => {
+  // Reviewer B passed, but only against the OLD head A — after the PR head moved
+  // to B, that is stale evidence and must not clear the gate.
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const reviewerHeads = [
+    reviewerHeadEvidence(session('reviewer_a', { head: HEAD_B }), HEAD_B), // fresh
+    reviewerHeadEvidence(session('reviewer_b', { head: HEAD_A }), HEAD_B), // stale
+  ];
+  const merge = computeMergeReadiness({
+    results,
+    verification: verifiedHead(HEAD_B),
+    reviewerHeads,
+    currentHeadShaShort: HEAD_B.slice(0, 7),
+  });
+  assert.equal(merge.mergeReady, false);
+  assert.equal(merge.recommendation, 'hold');
+  assert.match(merge.reasons.join(' '), /Reviewer B last reviewed .* current PR head .* stale/i);
+});
+
+test('merge gate: an incomplete (still-running) attempt for the current head holds', () => {
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('')];
+  const reviewerHeads = [
+    reviewerHeadEvidence(session('reviewer_a', { head: HEAD_B, status: 'completed' }), HEAD_B),
+    reviewerHeadEvidence(session('reviewer_b', { head: HEAD_B, status: 'running' }), HEAD_B),
+  ];
+  const merge = computeMergeReadiness({
+    results,
+    verification: verifiedHead(HEAD_B),
+    reviewerHeads,
+    currentHeadShaShort: HEAD_B.slice(0, 7),
+  });
+  assert.equal(merge.mergeReady, false);
+  assert.equal(merge.recommendation, 'hold');
+  assert.match(merge.reasons.join(' '), /Reviewer B has not produced a completed review/i);
+});
+
+test('merge gate: a stale reviewer\'s blockers are not consumed for the current head', () => {
+  // Reviewer A raised a blocker, but only against the old head A. With the head at
+  // B and A's attempt stale, that blocker is not current-head evidence, so it does
+  // not open a fix cycle — the gate holds for a fresh re-review instead.
+  const results = [
+    parseA('BLOCKING A-1: stale concern\nFile: a.ts:1\nDONE: ROLE=reviewer STATUS=fail BLOCKING=1'),
+    parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'),
+  ];
+  const reviewerHeads = [
+    reviewerHeadEvidence(session('reviewer_a', { head: HEAD_A }), HEAD_B), // stale
+    reviewerHeadEvidence(session('reviewer_b', { head: HEAD_B }), HEAD_B), // fresh
+  ];
+  const usableBlockers = acceptedBlockers(currentHeadResults(results, reviewerHeads));
+  assert.equal(usableBlockers.length, 0, 'a stale attempt\'s blockers are not consumed');
+  const merge = computeMergeReadiness({
+    results,
+    verification: verifiedHead(HEAD_B),
+    reviewerHeads,
+    currentHeadShaShort: HEAD_B.slice(0, 7),
+  });
+  assert.equal(merge.recommendation, 'hold');
+  assert.notEqual(merge.recommendation, 'request_fix');
+});
+
+test('merge gate without head evidence keeps the pre-#59 behavior (every result consumed)', () => {
+  // Backward compatibility: callers that pass no reviewerHeads get the legacy gate.
+  const results = [parseA('DONE: ROLE=reviewer STATUS=pass BLOCKING=0'), parseB('DONE: ROLE=reviewer STATUS=pass BLOCKING=0')];
+  const merge = computeMergeReadiness({ results, verification: verified() });
+  assert.equal(merge.mergeReady, true);
+  assert.equal(merge.recommendation, 'merge_ready');
 });
 
 // --- Accepted-blocker flattening + normalized text ---------------------------
