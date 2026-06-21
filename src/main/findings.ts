@@ -1,15 +1,22 @@
 import type {
   AgentRole,
   CommitVerification,
+  FallbackVerdictOutcome,
   FindingStatus,
+  GithubComment,
+  IgnoredVerdictComment,
   MergeReadiness,
   MergeRecommendation,
+  ReviewerEvidenceSource,
+  ReviewerFallbackVerdict,
   ReviewerFinding,
   ReviewerGateState,
   ReviewerHeadEvidence,
   ReviewerResult,
   ReviewerResultStatus,
   ReviewerSessionState,
+  ReviewerVerdictParse,
+  ReviewerVerdictStatus,
 } from '../shared/types.js';
 
 /**
@@ -144,6 +151,36 @@ function extractBlocks(lines: string[]): RawBlock[] {
   return blocks;
 }
 
+/**
+ * Build normalized {@link ReviewerFinding}s from parsed `BLOCKING …` blocks, all
+ * marked `severity: 'blocking'` and `status: 'open'` (the caller patches the
+ * lifecycle status once the overall result status is known). Shared by the
+ * captured-output parser and the fallback verdict-comment parser (issue #60) so
+ * both produce identical finding shapes that flow through the same fix cycle.
+ */
+function findingsFromBlocks(blocks: RawBlock[], reviewerId: string, paneId: AgentRole): ReviewerFinding[] {
+  return blocks.map((block) => {
+    const ref = block.fileRaw ? parseFileRef(block.fileRaw) : {};
+    return {
+      reviewerId,
+      paneId,
+      marker: block.marker,
+      severity: 'blocking',
+      status: 'open',
+      file: ref.file,
+      line: ref.line,
+      title: block.title || block.marker,
+      details: joinDetails(block.detailParts),
+      suggestedFix: block.suggestedFix,
+    };
+  });
+}
+
+/** Map a resolved result status to the lifecycle each of its findings carries. */
+function findingStatusFor(status: ReviewerResultStatus): FindingStatus {
+  return status === 'fail' ? 'accepted' : status === 'ambiguous' ? 'needs_human' : 'open';
+}
+
 /** Inputs for {@link parseReviewerOutput}. */
 export type ParseReviewerInput = {
   reviewerId: string;
@@ -191,21 +228,7 @@ export function parseReviewerOutput(input: ParseReviewerInput): ReviewerResult {
   const blockerCount = blocks.length;
 
   // Build findings before status is known; status is patched on below.
-  const findings: ReviewerFinding[] = blocks.map((block) => {
-    const ref = block.fileRaw ? parseFileRef(block.fileRaw) : {};
-    return {
-      reviewerId,
-      paneId,
-      marker: block.marker,
-      severity: 'blocking',
-      status: 'open',
-      file: ref.file,
-      line: ref.line,
-      title: block.title || block.marker,
-      details: joinDetails(block.detailParts),
-      suggestedFix: block.suggestedFix,
-    };
-  });
+  const findings: ReviewerFinding[] = findingsFromBlocks(blocks, reviewerId, paneId);
 
   let status: ReviewerResultStatus;
   if (text.trim().length === 0) {
@@ -257,7 +280,7 @@ export function parseReviewerOutput(input: ParseReviewerInput): ReviewerResult {
 
   // Patch finding lifecycle from the resolved status: accept cleanly-parsed
   // blockers on a fail; on an ambiguous result they need a human, never accepted.
-  const findingStatus: FindingStatus = status === 'fail' ? 'accepted' : status === 'ambiguous' ? 'needs_human' : 'open';
+  const findingStatus = findingStatusFor(status);
   for (const finding of findings) finding.status = findingStatus;
 
   return {
@@ -488,6 +511,420 @@ export function computeMergeReadiness(input: MergeReadinessInput): MergeReadines
     prHeadShaShort: currentShort,
     reviewerHeads,
   };
+}
+
+// ===========================================================================
+// Role-signed fallback verdict comments (issue #60)
+// ===========================================================================
+//
+// In dogfooding the same GitHub account often owns the PR branch, so a reviewer
+// agent cannot submit a *formal* approving GitHub review (GitHub refuses
+// same-author approval). The harness lets such a reviewer post a documented,
+// role-signed PR comment verdict instead — explicit, machine-readable, and tied
+// to the current PR head. This is deliberately distinct from GodMode's automatic
+// marker comment (`reviewerCommentBody`), which never asserts a verdict.
+//
+// The verdict line grammar (one line, anywhere in the comment body):
+//
+//   GODMODE_REVIEW_VERDICT reviewer=<id> pane=<reviewer_a|reviewer_b> pr=<n> \
+//     head=<7-or-40-char-sha> status=<approved|blocked> blocking=<count>
+//
+// A `blocked` verdict carries the same `BLOCKING A-1:` blocks the captured-output
+// parser understands, so its blockers normalize into the existing accepted-blocker
+// fix cycle. Everything below is pure so it is unit-tested without `gh`.
+
+/** The token that identifies a fallback verdict line. */
+export const VERDICT_MARKER_TOKEN = 'GODMODE_REVIEW_VERDICT';
+
+const VERDICT_MARKER_LINE = /\bGODMODE_REVIEW_VERDICT\b/i;
+/** A status token is canonicalized to one of the two verdict states. */
+const APPROVED_TOKENS = new Set(['approved', 'approve', 'pass']);
+const BLOCKED_TOKENS = new Set(['blocked', 'block', 'fail']);
+
+/** Read a `key=value` field from a verdict line; trims surrounding backticks. */
+function verdictField(line: string, key: string): string | undefined {
+  const match = line.match(new RegExp(`\\b${key}=([^\\s\`]+)`, 'i'));
+  return match ? match[1].trim() : undefined;
+}
+
+/** Whether two SHAs refer to the same commit, tolerating short (≥7) vs full. */
+function shaMatches(written: string | undefined, current: string | null): boolean {
+  if (!written || !current) return false;
+  const a = written.toLowerCase();
+  const b = current.toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(a) || b.length < 7) return false;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/** Whether a field looks like a real (hex, ≥7 char) SHA, so a mismatch is "stale". */
+function looksLikeSha(value: string | undefined): boolean {
+  return value !== undefined && /^[0-9a-f]{7,40}$/i.test(value);
+}
+
+type ConfiguredReviewer = { reviewerId: string; paneId: AgentRole };
+
+/**
+ * Attribute a verdict line to a configured reviewer by its `pane=` and/or
+ * `reviewer=` fields. Both must point at the *same* configured reviewer when both
+ * are present (an inconsistent pair is treated as unknown). Returns null when the
+ * comment cannot be tied to any configured reviewer — an unknown/unrelated author.
+ */
+function attributeReviewer(
+  reviewers: ConfiguredReviewer[],
+  reviewerField: string | undefined,
+  paneField: string | undefined,
+): ConfiguredReviewer | null {
+  const byPane = paneField ? reviewers.find((r) => r.paneId === paneField) : undefined;
+  const byId = reviewerField ? reviewers.find((r) => r.reviewerId === reviewerField) : undefined;
+  if (byPane && byId) return byPane.paneId === byId.paneId ? byPane : null;
+  return byPane ?? byId ?? null;
+}
+
+/** Canonicalize a `status=` token, or undefined when it is not a known verdict. */
+function canonicalVerdictStatus(token: string | undefined): ReviewerVerdictStatus | undefined {
+  if (!token) return undefined;
+  const lower = token.toLowerCase();
+  if (APPROVED_TOKENS.has(lower)) return 'approved';
+  if (BLOCKED_TOKENS.has(lower)) return 'blocked';
+  return undefined;
+}
+
+/** Inputs for {@link parseReviewerVerdictComments}. */
+export type ParseVerdictCommentsInput = {
+  /** The bound PR's comments, read live from `gh`. */
+  comments: GithubComment[];
+  /** The bound PR number — verdicts for any other PR are ignored. */
+  prNumber: number;
+  /** The verified current PR head SHA — verdicts for any other head are ignored. */
+  currentHeadSha: string | null;
+  /** The configured reviewers; verdicts from any other author/role are ignored. */
+  reviewers: ConfiguredReviewer[];
+};
+
+/** Per-pane accumulator while scanning comments. */
+type PaneAccumulator = {
+  reviewer: ConfiguredReviewer;
+  valid: ReviewerFallbackVerdict[];
+  malformed: string[];
+};
+
+/**
+ * Parse a PR's comments into role-signed fallback verdicts for the *current* head
+ * (issue #60). Pure and deterministic. Safety rules, in order, for every comment
+ * that contains the `GODMODE_REVIEW_VERDICT` token:
+ *
+ *  - it must be attributable to a configured reviewer (`pane=`/`reviewer=`); else
+ *    it is ignored as unknown/unrelated;
+ *  - a `pr=` that names a different PR → ignored (wrong-PR);
+ *  - a `head=` that is a real SHA not matching the current head → ignored
+ *    (stale-head);
+ *  - otherwise it is attributed to the pane and validated. A current-head verdict
+ *    that is malformed (missing/!numeric fields, unknown status, `approved` with
+ *    `blocking>0`, or `blocked` with no `BLOCKING` blocks) routes that pane to
+ *    **ambiguous**, never a silent pass;
+ *  - a pane with two or more current-head verdicts that disagree on status/count
+ *    routes to **ambiguous** (duplicate-conflicting); agreeing duplicates collapse
+ *    to one accepted verdict.
+ *
+ * When `currentHeadSha` is null (no verified PR head) there is no current head to
+ * tie a verdict to, so no fallback evidence is produced at all.
+ */
+export function parseReviewerVerdictComments(input: ParseVerdictCommentsInput): ReviewerVerdictParse {
+  const { comments, prNumber, currentHeadSha, reviewers } = input;
+  const ignored: IgnoredVerdictComment[] = [];
+  if (!currentHeadSha) return { outcomes: [], ignored };
+
+  const byPane = new Map<AgentRole, PaneAccumulator>();
+  const accFor = (reviewer: ConfiguredReviewer): PaneAccumulator => {
+    let acc = byPane.get(reviewer.paneId);
+    if (!acc) {
+      acc = { reviewer, valid: [], malformed: [] };
+      byPane.set(reviewer.paneId, acc);
+    }
+    return acc;
+  };
+
+  for (const comment of comments) {
+    const body = comment.body ?? '';
+    const lines = body.split(/\r?\n/);
+    const markerLine = lines.find((line) => VERDICT_MARKER_LINE.test(line));
+    if (markerLine === undefined) continue; // not a verdict comment
+
+    const author = comment.author ?? 'unknown';
+    const reviewerField = verdictField(markerLine, 'reviewer');
+    const paneField = verdictField(markerLine, 'pane');
+    const reviewer = attributeReviewer(reviewers, reviewerField, paneField);
+    if (!reviewer) {
+      ignored.push({ reason: 'unknown-reviewer: verdict not tied to a configured reviewer', author });
+      continue;
+    }
+
+    const prField = verdictField(markerLine, 'pr');
+    const prValue = prField !== undefined ? Number.parseInt(prField, 10) : NaN;
+    if (prField !== undefined && Number.isFinite(prValue) && prValue !== prNumber) {
+      ignored.push({ reason: `wrong-PR: verdict targets PR #${prValue}, not #${prNumber}`, author });
+      continue;
+    }
+
+    const headField = verdictField(markerLine, 'head');
+    if (looksLikeSha(headField) && !shaMatches(headField, currentHeadSha)) {
+      ignored.push({ reason: `stale-head: verdict targets ${headField}, not the current head`, author });
+      continue;
+    }
+
+    // Attributed to our pane, current PR, current (or unconfirmable) head: from
+    // here a problem is malformed → ambiguous, never a silent ignore.
+    const acc = accFor(reviewer);
+    const statusField = verdictField(markerLine, 'status');
+    const status = canonicalVerdictStatus(statusField);
+    const blockingField = verdictField(markerLine, 'blocking');
+    const blockingValue = blockingField !== undefined ? Number.parseInt(blockingField, 10) : NaN;
+
+    const problems: string[] = [];
+    if (prField === undefined || !Number.isFinite(prValue)) problems.push('missing/invalid pr=');
+    if (!looksLikeSha(headField)) problems.push('missing/invalid head=');
+    if (!status) problems.push(`unknown status=${statusField ?? '(none)'}`);
+    if (blockingField === undefined || !Number.isFinite(blockingValue)) problems.push('missing/invalid blocking=');
+
+    if (problems.length > 0 || !status) {
+      acc.malformed.push(`malformed verdict from ${author}: ${problems.join(', ')}`);
+      continue;
+    }
+
+    if (status === 'approved') {
+      if (blockingValue !== 0) {
+        acc.malformed.push(`approved verdict from ${author} declares blocking=${blockingValue}`);
+        continue;
+      }
+      acc.valid.push({
+        reviewerId: reviewer.reviewerId,
+        paneId: reviewer.paneId,
+        prNumber,
+        headSha: headField as string,
+        status: 'approved',
+        declaredBlocking: 0,
+        findings: [],
+        author,
+        createdAt: comment.createdAt ?? '',
+      });
+      continue;
+    }
+
+    // blocked: structured blockers must be present so they can drive the fix cycle.
+    const blocks = extractBlocks(lines);
+    if (blocks.length === 0) {
+      acc.malformed.push(`blocked verdict from ${author} carries no BLOCKING blocks`);
+      continue;
+    }
+    const findings = findingsFromBlocks(blocks, reviewer.reviewerId, reviewer.paneId);
+    for (const finding of findings) finding.status = 'open';
+    acc.valid.push({
+      reviewerId: reviewer.reviewerId,
+      paneId: reviewer.paneId,
+      prNumber,
+      headSha: headField as string,
+      status: 'blocked',
+      declaredBlocking: blockingValue,
+      findings,
+      author,
+      createdAt: comment.createdAt ?? '',
+    });
+  }
+
+  const outcomes: FallbackVerdictOutcome[] = [];
+  for (const acc of byPane.values()) {
+    const { reviewer, valid, malformed } = acc;
+    const base = { paneId: reviewer.paneId, reviewerId: reviewer.reviewerId } as const;
+    if (malformed.length > 0) {
+      outcomes.push({ ...base, kind: 'ambiguous', reason: malformed[0] });
+      continue;
+    }
+    if (valid.length === 0) continue;
+    if (valid.length === 1) {
+      outcomes.push({ ...base, kind: 'verdict', verdict: valid[0] });
+      continue;
+    }
+    const first = valid[0];
+    const allAgree = valid.every(
+      (v) => v.status === first.status && v.declaredBlocking === first.declaredBlocking,
+    );
+    if (allAgree) {
+      outcomes.push({ ...base, kind: 'verdict', verdict: first });
+    } else {
+      outcomes.push({
+        ...base,
+        kind: 'ambiguous',
+        reason: `duplicate-conflicting verdicts (${valid.map((v) => v.status).join(' vs ')})`,
+      });
+    }
+  }
+
+  return { outcomes, ignored };
+}
+
+/**
+ * One reviewer's *effective* current-head evidence after reconciling its
+ * captured-output artifact with any role-signed fallback verdict comment (issue
+ * #60): the result the merge gate should consume, the head evidence (with its
+ * {@link ReviewerEvidenceSource}), and the source for the UI.
+ */
+export type ReviewerEvidence = {
+  paneId: AgentRole;
+  reviewerId: string;
+  result: ReviewerResult;
+  head: ReviewerHeadEvidence;
+  source: ReviewerEvidenceSource;
+};
+
+/** Inputs for {@link reconcileReviewerEvidence}. */
+export type ReconcileReviewerEvidenceInput = {
+  reviewers: ConfiguredReviewer[];
+  /** Artifact-parsed results (from {@link parseReviewerOutput}). */
+  artifactResults: ReviewerResult[];
+  /** Session/artifact-derived head evidence (from {@link reviewerHeadEvidence}). */
+  sessionHeads: ReviewerHeadEvidence[];
+  /** Parsed fallback verdict outcomes (from {@link parseReviewerVerdictComments}). */
+  verdicts: FallbackVerdictOutcome[];
+  /** Verified current PR head SHA, for the fallback head evidence. */
+  currentHeadSha: string | null;
+  /** 7-char current head SHA, for compact display on fallback head evidence. */
+  currentHeadShaShort?: string | null;
+};
+
+function ambiguousResult(reviewer: ConfiguredReviewer, notes: string[]): ReviewerResult {
+  return { reviewerId: reviewer.reviewerId, paneId: reviewer.paneId, status: 'ambiguous', findings: [], notes };
+}
+
+/** Convert an accepted fallback verdict into a normalized {@link ReviewerResult}. */
+function verdictToResult(verdict: ReviewerFallbackVerdict, extraNotes: string[]): ReviewerResult {
+  const status: ReviewerResultStatus = verdict.status === 'approved' ? 'pass' : 'fail';
+  const findingStatus = findingStatusFor(status);
+  const findings = verdict.findings.map((finding) => ({ ...finding, status: findingStatus }));
+  return {
+    reviewerId: verdict.reviewerId,
+    paneId: verdict.paneId,
+    status,
+    declaredBlocking: verdict.declaredBlocking,
+    findings,
+    notes: [
+      `Cleared via role-signed fallback verdict comment (${verdict.status}) for the current head — harness evidence, not a formal GitHub approval.`,
+      ...extraNotes,
+    ],
+  };
+}
+
+function fallbackHead(
+  reviewer: ConfiguredReviewer,
+  currentHeadSha: string | null,
+  currentHeadShaShort: string | null | undefined,
+  source: ReviewerEvidenceSource,
+): ReviewerHeadEvidence {
+  return {
+    reviewerId: reviewer.reviewerId,
+    paneId: reviewer.paneId,
+    attemptHeadSha: currentHeadSha ?? undefined,
+    attemptHeadShaShort: currentHeadShaShort ?? undefined,
+    current: true,
+    completed: true,
+    source,
+  };
+}
+
+/**
+ * Reconcile each configured reviewer's captured-output artifact with its
+ * role-signed fallback verdict comment into one effective evidence record (issue
+ * #60). Precedence per reviewer:
+ *
+ *  - a fallback **ambiguous** outcome (malformed/duplicate-conflicting current-head
+ *    verdict) routes the reviewer to ambiguous → needs-human, even when its
+ *    artifact looks clean: a current-head verdict must never pass silently;
+ *  - a valid fallback **verdict** with a *conclusive* current-head artifact that
+ *    **conflicts** (one approves, the other blocks) → ambiguous (never the more
+ *    favorable result); when they **agree** the gate consumes the agreement
+ *    (`reconciled`);
+ *  - a valid fallback **verdict** with no usable current-head artifact (the
+ *    same-account case) → the gate consumes the verdict (`fallback_comment`), with
+ *    current/completed head evidence so it can clear the gate;
+ *  - no fallback verdict → the artifact result and its session head are used
+ *    unchanged (`artifact`), preserving the pre-#60 behavior.
+ *
+ * The merge gate (`computeMergeReadiness`) still requires the verified #9 commit
+ * evidence on top of this, so a fallback verdict can clear a reviewer gate only
+ * when the PR head is current and verified. Pure for direct unit testing.
+ */
+export function reconcileReviewerEvidence(input: ReconcileReviewerEvidenceInput): ReviewerEvidence[] {
+  const { reviewers, artifactResults, sessionHeads, verdicts, currentHeadSha, currentHeadShaShort } = input;
+
+  return reviewers.map((reviewer) => {
+    const pane = reviewer.paneId;
+    const artifact = artifactResults.find((r) => r.paneId === pane);
+    const sessionHead = sessionHeads.find((h) => h.paneId === pane);
+    const artifactUsable = Boolean(sessionHead && sessionHead.current && sessionHead.completed);
+    const artifactConclusive = artifactUsable && Boolean(artifact) && artifact!.status !== 'ambiguous';
+    const outcome = verdicts.find((v) => v.paneId === pane);
+
+    // Default (no fallback verdict): keep the artifact result + session head.
+    const artifactEvidence = (): ReviewerEvidence => ({
+      paneId: pane,
+      reviewerId: reviewer.reviewerId,
+      result: artifact ?? ambiguousResult(reviewer, ['No reviewer output was captured.']),
+      head: sessionHead
+        ? { ...sessionHead, source: 'artifact' }
+        : { reviewerId: reviewer.reviewerId, paneId: pane, current: false, completed: false, source: 'artifact' },
+      source: 'artifact',
+    });
+
+    if (!outcome) return artifactEvidence();
+
+    if (outcome.kind === 'ambiguous') {
+      return {
+        paneId: pane,
+        reviewerId: reviewer.reviewerId,
+        result: ambiguousResult(reviewer, [
+          `Role-signed fallback verdict comment is ambiguous: ${outcome.reason}. Routed to needs-human.`,
+        ]),
+        head: fallbackHead(reviewer, currentHeadSha, currentHeadShaShort, 'fallback_comment'),
+        source: 'fallback_comment',
+      };
+    }
+
+    const verdict = outcome.verdict;
+    if (artifactConclusive) {
+      const artifactPassed = artifact!.status === 'pass';
+      const verdictApproved = verdict.status === 'approved';
+      if (artifactPassed === verdictApproved) {
+        // Agreement: consume it, preferring the verdict's structured blockers.
+        return {
+          paneId: pane,
+          reviewerId: reviewer.reviewerId,
+          result: verdictToResult(verdict, [
+            'Captured artifact and fallback verdict agree for the current head.',
+          ]),
+          head: fallbackHead(reviewer, currentHeadSha, currentHeadShaShort, 'reconciled'),
+          source: 'reconciled',
+        };
+      }
+      // Conflict: never pick the favorable result.
+      return {
+        paneId: pane,
+        reviewerId: reviewer.reviewerId,
+        result: ambiguousResult(reviewer, [
+          `Captured artifact (${artifact!.status}) and fallback verdict (${verdict.status}) conflict for the current head; routed to needs-human rather than choosing the favorable result.`,
+        ]),
+        head: fallbackHead(reviewer, currentHeadSha, currentHeadShaShort, 'reconciled'),
+        source: 'reconciled',
+      };
+    }
+
+    // No usable current-head artifact: the same-account fallback case.
+    return {
+      paneId: pane,
+      reviewerId: reviewer.reviewerId,
+      result: verdictToResult(verdict, []),
+      head: fallbackHead(reviewer, currentHeadSha, currentHeadShaShort, 'fallback_comment'),
+      source: 'fallback_comment',
+    };
+  });
 }
 
 /**

@@ -16,8 +16,11 @@ PASS line is never enough to reach `merge_ready`.
 
 | Concern | Owner |
 | --- | --- |
-| Finding/result/merge-gate/findings types | `src/shared/types.ts` (`ReviewerFinding`, `ReviewerResult`, `MergeReadiness`, `RunFindings`, `ReviewSynthesisResult`) |
+| Finding/result/merge-gate/findings types | `src/shared/types.ts` (`ReviewerFinding`, `ReviewerResult`, `MergeReadiness`, `RunFindings`, `ReviewSynthesisResult`, `ReviewerFallbackVerdict`, `FallbackVerdictOutcome`, `ReviewerEvidenceSource`) |
 | Pure parsing + merge gate + blocker text + current-head evidence | `src/main/findings.ts` (`parseReviewerOutput`, `computeMergeReadiness`, `acceptedBlockers`, `renderBlockersText`, `reviewerHeadEvidence`, `currentHeadResults`) |
+| Pure fallback verdict parsing + evidence reconciliation (issue #60) | `src/main/findings.ts` (`parseReviewerVerdictComments`, `reconcileReviewerEvidence`) |
+| Reviewer fallback-verdict prompt grammar (issue #60) | `src/main/reviewer.ts` (`reviewerVerdictExampleLine`, `REVIEWER_VERDICT_MARKER`) |
+| Read-only PR comment fetch (issue #60) | `src/main/github.ts` (`getPrComments`) |
 | Pointer-first fix handoff | `composeFixHandoff` in `src/main/handoff.ts` |
 | Findings persistence + reviewer-artifact read | `src/main/artifacts.ts` (`writeRunFindings`, `readReviewerArtifact`) |
 | Findings on the run snapshot | `setRunFindings` / `setCurrentRunFindings` in `src/main/run.ts` |
@@ -73,6 +76,71 @@ the decision for the new head. The synthesis records `prHeadSha`/`prHeadShaShort
 and the `reviewerHeads` evidence on `RunFindings` for audit and the UI, which
 labels any stale attempt and shows the head being evaluated.
 
+## Role-signed fallback verdict comments (issue #60)
+
+Formal GitHub reviews are the primary reviewer signal, but GitHub refuses
+**same-author approval** — and dogfooding routinely runs several logically-distinct
+GodMode roles through one local GitHub account that also owns the PR branch. In
+that case a reviewer cannot submit a formal approving review, so the harness
+recognizes a documented, role-signed **fallback verdict comment** instead. It is
+deliberately distinct from GodMode's automatic marker comment
+(`reviewerCommentBody`), which never asserts a verdict.
+
+The verdict line (one line, anywhere in a PR comment body):
+
+```text
+GODMODE_REVIEW_VERDICT reviewer=<id> pane=<reviewer_a|reviewer_b> pr=<n> head=<7-or-40-char-sha> status=<approved|blocked> blocking=<count>
+```
+
+A `blocked` verdict carries the same `BLOCKING A-1:` blocks the captured-output
+parser understands, so its blockers normalize into the existing accepted-blocker
+fix cycle. The reviewer prompts and role docs instruct reviewers to try a formal
+review first and only fall back to this comment when GitHub refuses same-account
+approval; `src/main/reviewer.ts` builds the example line from
+`reviewerVerdictExampleLine` so prompt and parser share one grammar.
+
+`parseReviewerVerdictComments` (pure) turns a PR's comments into per-pane outcomes,
+accepting only verdicts for **configured reviewers**, the **bound PR**, and the
+**current head**. Its safety rules, in order, for each comment carrying the
+`GODMODE_REVIEW_VERDICT` token:
+
+- not attributable to a configured `pane=`/`reviewer=` → **ignored** (unknown/
+  unrelated); an inconsistent pane/reviewer pair is unknown too;
+- a `pr=` naming a different PR → **ignored** (wrong-PR);
+- a `head=` that is a real SHA not matching the current head → **ignored**
+  (stale-head);
+- otherwise attributed to the pane and validated. A current-head verdict that is
+  malformed (missing/non-numeric fields, unknown status, `approved` with
+  `blocking>0`, or `blocked` with no `BLOCKING` blocks) → **ambiguous**, never a
+  silent pass;
+- two or more current-head verdicts for a pane that disagree on status/count →
+  **ambiguous** (duplicate-conflicting); agreeing duplicates collapse to one.
+
+When there is no verified PR head, no fallback evidence is produced at all — a
+verdict can only ever be tied to a current head.
+
+`reconcileReviewerEvidence` (pure) then merges each reviewer's captured-output
+artifact with its fallback outcome into one effective evidence record (result +
+head evidence + `ReviewerEvidenceSource`):
+
+- a fallback **ambiguous** outcome routes the reviewer to needs-human even if its
+  artifact looks clean — a current-head verdict must never pass silently;
+- a valid fallback **verdict** with a *conclusive* current-head artifact that
+  **conflicts** → **ambiguous** (never the more favorable result); when they
+  **agree** the gate consumes the agreement (`source: reconciled`);
+- a valid fallback **verdict** with no usable current-head artifact (the
+  same-account case) → the gate consumes the verdict (`source: fallback_comment`)
+  with current/completed head evidence;
+- no fallback verdict → the artifact result and session head are used unchanged
+  (`source: artifact`), preserving pre-#60 behavior.
+
+Synthesis feeds the reconciled results + head evidence into the same merge gate, so
+a fallback verdict can clear a reviewer gate **only when the PR head is current AND
+the #9 commit-verification gate is verified**. The `source` is recorded on each
+`ReviewerHeadEvidence` and surfaced in the dashboard (a "role-signed comment" /
+"artifact + comment" chip plus an explanatory note) so an operator never mistakes a
+role-signed harness verdict for a GitHub-native approval.
+
 ## The merge gate
 
 `computeMergeReadiness` is `merge_ready` only when **all** hold:
@@ -115,8 +183,12 @@ It returns an ordered `reasons[]` explaining any unmet condition and a
    catch. If the attempts changed, synthesis aborts as `preempted` rather than
    building findings from — or transitioning over — the freshly relaunched reviewers
    while they are still running (issue #59, blocker A-2);
-2. parse each tracked reviewer's captured output;
-3. compute the merge gate;
+2. parse each tracked reviewer's captured output AND fetch the bound PR's comments
+   (`getPrComments`, read-only, in the same await window the stale/preemption
+   guards protect), parse role-signed fallback verdicts
+   (`parseReviewerVerdictComments`), and reconcile artifact-vs-verdict evidence per
+   reviewer (`reconcileReviewerEvidence`) — issue #60;
+3. compute the merge gate from the reconciled results + head evidence;
 4. persist `RunFindings` on the run and to `.godmode/runs/<run-id>/findings.json`;
 5. advance `synthesize_reviews → review_synthesis`, then route by recommendation:
    - `merge_ready` → `mark_merge_ready`,

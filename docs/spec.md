@@ -229,6 +229,24 @@ the fix, and max-cycle limits stay authoritative in the run state machine. Findi
 are stored on the run and mirrored to `.godmode/runs/<run-id>/findings.json`. See
 `docs/architecture/review-synthesis.md`.
 
+When a **formal** GitHub review is unavailable — typically a dogfood run where the
+same authenticated account owns the PR branch, so GitHub refuses same-author
+approval — synthesis also reads the bound PR's comments for **role-signed fallback
+verdicts**: a documented `GODMODE_REVIEW_VERDICT reviewer=… pane=… pr=… head=… status=approved|blocked blocking=…`
+line (distinct from GodMode's automatic marker comment) that a reviewer posts for
+the current head. Only verdicts from a configured reviewer, the bound PR, and the
+current head are accepted; stale-head, wrong-PR, unknown-reviewer, malformed, and
+duplicate-conflicting verdicts are ignored or routed to `needs_human`, never a
+silent pass. A `blocked` verdict's structured blockers normalize into the same
+accepted-blocker fix cycle. Fallback comment evidence is reconciled with the
+captured artifact per reviewer — agreement clears, conflict routes to
+`needs_human` (never the favorable result) — and a fallback verdict can clear a
+reviewer gate only when the PR head is current and the #9 commit gate is verified.
+The dashboard labels a reviewer cleared this way as role-signed harness evidence,
+not a GitHub-native approval. Roles stay generic (`reviewer_a`/`reviewer_b`,
+configured reviewer ids); no GitHub username or vendor is hardcoded. See
+`docs/architecture/review-synthesis.md`.
+
 ### Automatic review/fix loop
 
 Once a run has a verified PR, an optional **review/fix loop controller** in the

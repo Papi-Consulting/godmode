@@ -148,6 +148,57 @@ export function reviewerAttemptId(input: ReviewerAttemptIdInput): string {
   ].join('-');
 }
 
+/** The token a role-signed fallback verdict line must contain (issue #60). */
+export const REVIEWER_VERDICT_MARKER = 'GODMODE_REVIEW_VERDICT';
+
+/**
+ * The example role-signed fallback verdict line a reviewer posts when a *formal*
+ * GitHub review is unavailable (issue #60) — typically a dogfood run where the
+ * same authenticated account owns the PR branch, so GitHub refuses same-author
+ * approval. The `{{head}}` placeholder is left literal because the reviewer must
+ * fill in the PR's current head SHA itself (read from `gh pr view`), tying the
+ * verdict to the exact commit under review. Pure so the grammar is unit-tested and
+ * stays the single source the parser and prompts agree on.
+ */
+export function reviewerVerdictExampleLine(reviewerId: string, paneId: AgentRole, prNumber: number): string {
+  return `${REVIEWER_VERDICT_MARKER} reviewer=${reviewerId} pane=${paneId} pr=${prNumber} head=<current-head-sha> status=approved blocking=0`;
+}
+
+/**
+ * The fallback-verdict guidance appended to a reviewer prompt (issue #60). It
+ * tells the reviewer to prefer a formal GitHub review, and ONLY when GitHub
+ * refuses (e.g. same-account) to post a single role-signed verdict comment for the
+ * current head — explicitly framed as harness evidence, not a GitHub-native
+ * approval, and distinct from GodMode's automatic marker comment.
+ */
+function fallbackVerdictBlock(reviewerId: string, paneId: AgentRole, pr: ReviewerPrTarget): string {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('Recording your verdict:');
+  lines.push(
+    '- Prefer a FORMAL GitHub review (approve / request changes). If GitHub refuses ' +
+      'because the same account owns the PR branch (common in dogfooding), fall back to ' +
+      'ONE role-signed verdict comment for the CURRENT head:',
+  );
+  lines.push('');
+  lines.push('```text');
+  lines.push(reviewerVerdictExampleLine(reviewerId, paneId, pr.number));
+  lines.push('```');
+  lines.push(
+    `- Set head=<current-head-sha> from \`gh pr view ${pr.number} --json headRefOid\` (7- or 40-char), ` +
+      'status=approved|blocked, and blocking=<count>. For a blocked verdict, list each blocker as a ' +
+      '`BLOCKING ' +
+      (paneId === 'reviewer_a' ? 'A' : 'B') +
+      '-1:` block (File:/Issue:/Why it blocks:/Suggested fix:) after the verdict line.',
+  );
+  lines.push(
+    '- This verdict comment is role-signed HARNESS evidence for the current head, NOT a ' +
+      'GitHub-native approval, and is distinct from GodMode’s automatic marker comment. A ' +
+      'stale-head, wrong-PR, malformed, or conflicting verdict is ignored or routed to a human.',
+  );
+  return lines.join('\n');
+}
+
 /**
  * The pointer-first required-reading block appended to each reviewer prompt. It
  * directs a FRESH reviewer to read the operated project's own sources and the
@@ -161,6 +212,7 @@ function groundingBlock(
   projectName: string | undefined,
   pr: ReviewerPrTarget,
   issueNumber: number | undefined,
+  paneId: AgentRole,
 ): string {
   const project = projectName ? `"${projectName}"` : '(unnamed)';
   const lines: string[] = [];
@@ -188,6 +240,7 @@ function groundingBlock(
     `Post your findings as PR comments on #${pr.number}, signed as ${reviewerId}. Block only per your role ` +
       'doc; do not approve on unverified claims.',
   );
+  lines.push(fallbackVerdictBlock(reviewerId, paneId, pr));
   return lines.join('\n');
 }
 
@@ -228,7 +281,7 @@ export function composeReviewerLaunch(
     const { prompt: templatePrompt, missingVariables } = renderTemplate(templates.reviewer_start, vars);
 
     const prompt = pr
-      ? `${templatePrompt}\n\n${groundingBlock(reviewer.id, displayName, roleDoc, projectName, pr, issueNumber)}`
+      ? `${templatePrompt}\n\n${groundingBlock(reviewer.id, displayName, roleDoc, projectName, pr, issueNumber, reviewer.pane)}`
       : templatePrompt;
 
     return {
