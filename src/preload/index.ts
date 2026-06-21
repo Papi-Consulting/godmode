@@ -16,6 +16,7 @@ import type {
   LoopModeResult,
   LoopState,
   ManagedWorktree,
+  PaneSessionState,
   PrCandidateMatchReason,
   PrDiscoveryEvent,
   PrDiscoveryResult,
@@ -178,6 +179,14 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, payload: { paneId: string }) => callback(payload);
     ipcRenderer.on(GODMODE_IPC.ptyStarted, listener);
     return () => ipcRenderer.off(GODMODE_IPC.ptyStarted, listener);
+  },
+  // Pane session-state lifecycle truth (issue #63): fetch the current snapshot, and
+  // subscribe to pushes so headers/controls/message inputs track real process state.
+  getPtyStates: () => ipcRenderer.invoke(GODMODE_IPC.ptyStateGet) as Promise<PaneSessionState[]>,
+  onPtyState: (callback: (states: PaneSessionState[]) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: PaneSessionState[]) => callback(payload);
+    ipcRenderer.on(GODMODE_IPC.ptyState, listener);
+    return () => ipcRenderer.off(GODMODE_IPC.ptyState, listener);
   },
 };
 

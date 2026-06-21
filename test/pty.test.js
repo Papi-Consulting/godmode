@@ -10,8 +10,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { resolveRoleLaunch } from '../dist/main/agents.js';
 import {
+  detectPromptAttention,
+  getPaneSessionState,
+  getPaneSessionStates,
   openPtySession,
   resolveExecutable,
+  setPaneSessionListener,
   stopPtySession,
   writeToPtySessionResult,
 } from '../dist/main/pty.js';
@@ -137,6 +141,118 @@ test('writeToPtySessionResult confirms a write to a live session', () => {
   } finally {
     stopPtySession('builder');
   }
+});
+
+// --- Pane session-state lifecycle truth (issue #63) ----------------------------
+// The renderer must reflect real PTY process state (running / exited / stopped /
+// failed) instead of inferring from local button clicks, so main tracks it as the
+// single source of truth and pushes snapshots.
+
+/** Resolve once a pane reaches `exited`/`stopped`/`failed`, or reject on timeout. */
+function waitForPaneSettled(paneId, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = () => {
+      const state = getPaneSessionState(paneId);
+      if (state && (state.lifecycle === 'exited' || state.lifecycle === 'stopped' || state.lifecycle === 'failed')) {
+        resolve(state);
+        return;
+      }
+      if (Date.now() - started > timeoutMs) {
+        reject(new Error(`pane ${paneId} did not settle in ${timeoutMs}ms (was ${state?.lifecycle})`));
+        return;
+      }
+      setTimeout(tick, 15);
+    };
+    tick();
+  });
+}
+
+test('getPaneSessionStates tracks all four role panes', () => {
+  const states = getPaneSessionStates();
+  assert.deepEqual(
+    states.map((s) => s.paneId),
+    ['head', 'builder', 'reviewer_a', 'reviewer_b'],
+  );
+});
+
+test('a live PTY reports running, then stopped reads as operator-ended (not exited)', () => {
+  const root = makeProject();
+  // `cat` reads stdin and stays alive, so the pane is genuinely running.
+  const started = openPtySession({ paneId: 'head', projectRoot: root, command: 'cat', onData: () => {}, onExit: () => {} });
+  assert.equal(started.ok, true, started.ok ? '' : started.error);
+  const running = getPaneSessionState('head');
+  assert.equal(running.lifecycle, 'running');
+  assert.equal(running.live, true);
+  assert.equal(typeof running.pid, 'number');
+  assert.equal(running.cwd, root);
+
+  stopPtySession('head');
+  const stopped = getPaneSessionState('head');
+  assert.equal(stopped.lifecycle, 'stopped');
+  assert.equal(stopped.live, false);
+  assert.equal(stopped.pid, null);
+});
+
+test('a one-shot process that exits reports exited with its code (not running/idle)', async () => {
+  // Regression guard: a fake one-shot reviewer that exits must show `exited` with a
+  // code, never linger as a live `watching`/`running` watcher.
+  const root = makeProject();
+  const started = openPtySession({
+    paneId: 'reviewer_a',
+    projectRoot: root,
+    command: 'node -e process.exit(7)',
+    onData: () => {},
+    onExit: () => {},
+  });
+  assert.equal(started.ok, true, started.ok ? '' : started.error);
+  const settled = await waitForPaneSettled('reviewer_a');
+  assert.equal(settled.lifecycle, 'exited');
+  assert.equal(settled.exitCode, 7);
+  assert.equal(settled.live, false);
+});
+
+test('a failed launch reports failed with a visible reason and no live session', () => {
+  const root = makeProject();
+  const result = openPtySession({
+    paneId: 'reviewer_b',
+    projectRoot: root,
+    command: 'definitely-not-a-real-binary-xyz',
+    onData: () => {},
+    onExit: () => {},
+  });
+  assert.equal(result.ok, false);
+  const state = getPaneSessionState('reviewer_b');
+  assert.equal(state.lifecycle, 'failed');
+  assert.equal(state.live, false);
+  assert.match(state.error, /Command not found/);
+});
+
+test('setPaneSessionListener receives a snapshot on every lifecycle change', () => {
+  const root = makeProject();
+  const snapshots = [];
+  setPaneSessionListener((states) => snapshots.push(states));
+  try {
+    const started = openPtySession({ paneId: 'builder', projectRoot: root, command: 'cat', onData: () => {}, onExit: () => {} });
+    assert.equal(started.ok, true, started.ok ? '' : started.error);
+    stopPtySession('builder');
+    assert.ok(snapshots.length >= 2, 'listener should fire on running and on stop');
+    const last = snapshots[snapshots.length - 1].find((s) => s.paneId === 'builder');
+    assert.equal(last.lifecycle, 'stopped');
+  } finally {
+    setPaneSessionListener(null);
+  }
+});
+
+test('detectPromptAttention fires only on generic confirmation prompts', () => {
+  assert.equal(detectPromptAttention('Do you want to proceed? [y/N] '), true);
+  assert.equal(detectPromptAttention('Allow this edit? (yes/no)'), true);
+  assert.equal(detectPromptAttention('Press Enter to continue'), true);
+  assert.equal(detectPromptAttention('Waiting for your approval'), true);
+  // Negatives: ordinary output must not be misread as a blocking prompt.
+  assert.equal(detectPromptAttention('Running tests...'), false);
+  assert.equal(detectPromptAttention('Compiled 12 files in 1.2s'), false);
+  assert.equal(detectPromptAttention(''), false);
 });
 
 test('resolveExecutable resolves a project-relative executable path', () => {

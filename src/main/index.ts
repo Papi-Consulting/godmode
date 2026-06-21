@@ -14,11 +14,13 @@ import {
 } from './github.js';
 import type { DiscoveryContext } from './discovery.js';
 import {
+  getPaneSessionStates,
   getPtySessionCwd,
   hasPtySession,
   killAllPtySessions,
   openPtySession,
   resizePtySession,
+  setPaneSessionListener,
   stopPtySession,
   writeToPtySession,
   writeToPtySessionResult,
@@ -2412,6 +2414,15 @@ function handleStopPty(_event: Electron.IpcMainEvent, input: unknown) {
   stopPtySession(payload.paneId);
 }
 
+/**
+ * Return the current pane session-state snapshot (issue #63). The renderer fetches
+ * this on mount/project-change; subsequent changes arrive via the pushed
+ * `godmode:pty:state` channel wired in {@link registerIpcHandlers}.
+ */
+function handleGetPtyStates() {
+  return getPaneSessionStates();
+}
+
 /** Statuses from which the operator may still flip a run's isolation (issue #41). */
 const ISOLATION_TOGGLE_STATUSES = new Set(['issue_selected', 'needs_spec', 'ready_to_build']);
 
@@ -2537,6 +2548,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(GODMODE_IPC.ptySend, handleSendPty);
   ipcMain.on(GODMODE_IPC.ptyResize, handleResizePty);
   ipcMain.on(GODMODE_IPC.ptyStop, handleStopPty);
+  ipcMain.handle(GODMODE_IPC.ptyStateGet, handleGetPtyStates);
+  // Push every pane session-state change to the renderer (issue #63) so headers,
+  // controls, and message inputs reflect the live process truth without polling.
+  setPaneSessionListener((states) => emitToRenderer(GODMODE_IPC.ptyState, states));
 }
 
 app.whenReady().then(() => {
