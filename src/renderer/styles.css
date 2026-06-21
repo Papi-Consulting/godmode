@@ -915,6 +915,72 @@ p {
   color: #ff9d9d;
 }
 
+/* Pane session-state lifecycle surfaces (issue #63). The header status text and
+   status dot reflect main's process truth, so running/exited/stopped/failed/waiting
+   never look the same as the old static "ready/watching". */
+.agent-session-status {
+  color: var(--text-soft);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.agent-session-status.attention {
+  color: #ffce6a;
+  font-weight: 600;
+}
+
+.agent-focus {
+  color: #7dd3fc;
+  font-size: 0.58rem;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* Session-state status dot. Placed after the accent rules so it overrides the
+   accent colour with the live process state (equal specificity, later wins). */
+.status-dot.session-dot-live {
+  background: var(--green);
+  box-shadow: 0 0 10px rgba(75, 245, 138, 0.45);
+}
+
+.status-dot.session-dot-exited,
+.status-dot.session-dot-stopped {
+  background: #5b6677;
+  box-shadow: none;
+}
+
+.status-dot.session-dot-failed {
+  background: #ff6b6b;
+  box-shadow: 0 0 10px rgba(255, 107, 107, 0.5);
+}
+
+.status-dot.session-dot-never_started {
+  background: #3a4150;
+  box-shadow: none;
+}
+
+/* A pane waiting on the operator (detectable permission/confirmation prompt). */
+.session-attention .status-dot.session-dot-live {
+  background: #ffce6a;
+  box-shadow: 0 0 12px rgba(255, 206, 106, 0.6);
+}
+
+.session-attention {
+  outline: 1px solid rgba(255, 206, 106, 0.4);
+}
+
+.agent-message-row input:disabled,
+.agent-message-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /*
  * The pane is a fixed header + scrolling body + fixed footer. The body owns the
  * only scroll region so the footer (Refresh / merge gate) can never overlap the
