@@ -102,7 +102,10 @@ const FORWARD_EDGES: Record<RunStatus, Partial<Record<RunAction, RunStatus>>> = 
   // `flag_needs_human` edge so a recorded-PR mismatch discovered on resume (issue
   // #40) can always be routed to `needs_human` with a visible reason — a resumed
   // run that was persisted in one of these states (with a `prNumber`) must never
-  // continue blind because the escalation transition was illegal.
+  // continue blind because the escalation transition was illegal. The
+  // `mark_merge_ready` edge here is structurally legal but evidence-gated (issue
+  // #62): `canMarkMergeReady` refuses it unless the run holds current, positive
+  // merge evidence, so neither state is an evidence-free manual merge override.
   needs_human: {
     mark_ready: 'ready_to_build',
     mark_merge_ready: 'merge_ready',
@@ -168,14 +171,74 @@ function resolveTarget(run: RunSnapshot, action: RunAction): RunStatus | undefin
 }
 
 /**
+ * Whether the run currently holds the **positive merge evidence** the `merge_ready`
+ * gate requires (issue #62). This is the single predicate both
+ * {@link computeAvailableActions} (what the renderer advertises) and
+ * {@link applyAction} (what is actually permitted) consult, so a `mark_merge_ready`
+ * transition from `review_synthesis`, `needs_human`, or `max_cycles_exceeded` can
+ * never be surfaced as an ordinary button — nor forced via IPC/manual dispatch — on
+ * ambiguous, missing, or stale reviewer/verification evidence.
+ *
+ * GodMode is an agent harness, not a self-report trust layer: a `merge_ready`
+ * transition is allowed only when the run's own recorded evidence says the merge
+ * gate is satisfied AND that decision still applies to the current PR head:
+ *
+ *  - parsed findings exist and `findings.merge.mergeReady === true` — which itself
+ *    requires (see `computeMergeReadiness`) both reviewers cleared for the current
+ *    head, no ambiguity, no accepted blockers, and the verified #9 commit evidence;
+ *  - the run's latest recorded #9 verification is `verified` and current-head
+ *    verified (issue #61), so a verification that went `stale_head` after a positive
+ *    synthesis invalidates the gate;
+ *  - the head those findings were computed against still matches that latest
+ *    verification's head, so head drift after a positive synthesis can never leave a
+ *    stale "merge-ready" decision standing.
+ *
+ * Pure and Electron-free; it consumes only the snapshot's own recorded evidence so
+ * the gate is unit-tested directly and shared by the renderer and the guard.
+ */
+export function canMarkMergeReady(run: RunSnapshot): boolean {
+  const findings = run.findings;
+  if (!findings || findings.merge.mergeReady !== true) return false;
+  const latest = latestRunVerification(run);
+  if (!latest || latest.status !== 'verified') return false;
+  // Current-head proof must be explicit and positive. A legacy/pre-#61 or
+  // malformed verification entry that omits `currentHeadVerified` is *not*
+  // current-head evidence, so absence is rejected exactly like an explicit
+  // `false` — only `=== true` clears this gate (issues #61, #62).
+  if (latest.currentHeadVerified !== true) return false;
+  // The positive synthesis must still apply to the head the latest verification
+  // confirmed. Both heads must be present *and* match: a missing
+  // `findings.prHeadSha` or `latest.verifiedHeadSha` is not proof the two refer
+  // to the same current head, so the gate cannot assume agreement from absence —
+  // and post-synthesis head drift can never leave a stale "merge-ready" standing.
+  if (
+    findings.prHeadSha === undefined ||
+    latest.verifiedHeadSha === undefined ||
+    !commitMatches(findings.prHeadSha, latest.verifiedHeadSha)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * The actions valid from a run's current state. Renderers render exactly these
  * as operator controls. `resume` is surfaced only while paused (and only when a
  * resume target was recorded). `request_fix` is dropped once the cycle budget is
- * exhausted, so the loop deterministically stops at `maxCycles`.
+ * exhausted, so the loop deterministically stops at `maxCycles`. `mark_merge_ready`
+ * is dropped unless the run holds current, positive merge evidence (issue #62), so
+ * the operator is never offered an evidence-free merge-ready button.
  */
 export function computeAvailableActions(run: RunSnapshot): RunAction[] {
   let base = Object.keys(TRANSITION_TABLE[run.status]) as RunAction[];
   if (run.cycle >= run.maxCycles) base = base.filter((action) => action !== 'request_fix');
+  // Issue #62: the merge gate lives in the state-machine path. `mark_merge_ready`
+  // is advertised only when the run holds current, positive merge evidence — never
+  // as a generic operator override from review_synthesis/needs_human/
+  // max_cycles_exceeded on ambiguous, missing, or stale evidence. applyAction
+  // enforces the same predicate, so hiding the button is a UI affordance layered on
+  // top of the real guard, not the security boundary itself.
+  if (!canMarkMergeReady(run)) base = base.filter((action) => action !== 'mark_merge_ready');
   if (run.status === 'paused' && run.resumeStatus) return ['resume', ...base];
   return base;
 }
@@ -236,6 +299,26 @@ export function applyAction(
       ok: false,
       code: 'invalid_transition',
       error: `Fix-cycle budget reached (cycle ${run.cycle} of ${run.maxCycles}); cannot request another fix. Route to max_cycles_exceeded or mark merge-ready.`,
+      run,
+    };
+  }
+
+  // Merge-ready evidence gate (issue #62), layered on top of the structural table
+  // exactly like the cycle-budget guard above. The `mark_merge_ready` edge is
+  // structurally legal from review_synthesis/needs_human/max_cycles_exceeded, but a
+  // run reaches `merge_ready` only with current, positive merge evidence — never as
+  // a generic operator override on ambiguous/missing/stale reviewer or verification
+  // evidence. This runs even when a caller dispatches the action directly over IPC,
+  // so the gate cannot be bypassed by the renderer; the unchanged snapshot is
+  // returned (no mutation) so the caller can surface exactly why it was refused.
+  if (action === 'mark_merge_ready' && !canMarkMergeReady(run)) {
+    return {
+      ok: false,
+      code: 'merge_evidence_required',
+      error:
+        'Cannot mark merge-ready: the run lacks current, positive merge evidence. ' +
+        'Merge-ready requires both reviewers cleared for the current PR head, no ambiguous reviewer output, ' +
+        'no accepted blockers, and a verified current-head commit (#9). Synthesize reviews to recompute the merge gate.',
       run,
     };
   }

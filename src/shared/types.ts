@@ -912,8 +912,21 @@ export type RunSnapshot = {
   updatedAt: string;
 };
 
-/** Why a run action was rejected, so the UI can explain the failure precisely. */
-export type RunRejectionCode = 'no_run' | 'invalid_transition' | 'invalid_payload';
+/**
+ * Why a run action was rejected, so the UI can explain the failure precisely.
+ *
+ * `merge_evidence_required` (issue #62) is distinct from `invalid_transition`: the
+ * `mark_merge_ready` action is structurally legal from `review_synthesis` /
+ * `needs_human` / `max_cycles_exceeded`, but the state-machine merge gate refused
+ * it because the run lacks current, positive merge evidence (see
+ * `canMarkMergeReady`). A distinct code lets the UI tell "not allowed from here"
+ * apart from "allowed, but the merge gate is not satisfied yet".
+ */
+export type RunRejectionCode =
+  | 'no_run'
+  | 'invalid_transition'
+  | 'invalid_payload'
+  | 'merge_evidence_required';
 
 /**
  * Result of a run mutation. On success the new snapshot is returned; on failure

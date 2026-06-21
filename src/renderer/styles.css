@@ -792,6 +792,14 @@ p {
   font-size: 0.62rem;
 }
 
+/* Issue #62: why merge-ready is held when the evidence gate is not satisfied. */
+.run-merge-hint {
+  margin: 6px 0;
+  color: var(--text-soft);
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
 .run-pr-manual-row {
   display: flex;
   gap: 6px;
