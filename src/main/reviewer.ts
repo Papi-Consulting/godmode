@@ -3,6 +3,7 @@ import type {
   AgentRole,
   ReviewerHandoff,
   ReviewerLaunchPlan,
+  ReviewerSessionState,
   ReviewerSessionStatus,
   RunAction,
   RunSnapshot,
@@ -409,6 +410,39 @@ export function isLoopReviewSynthesisPreempted(
   generationStale: boolean,
 ): boolean {
   return generationStale || isReviewSynthesisPreempted(liveStatus);
+}
+
+/**
+ * A stable, order-independent identity of a run's tracked reviewer attempts: the
+ * set of `<paneId>:<attemptId>` pairs. Every reviewer launch/relaunch mints a
+ * fresh `attemptId` (issue #59), so comparing this fingerprint across an `await`
+ * proves whether a relaunch replaced the sessions in between. Pure for testing.
+ */
+export function reviewerAttemptFingerprint(
+  reviewers: ReviewerSessionState[] | undefined,
+): string {
+  if (!reviewers || reviewers.length === 0) return '';
+  return reviewers
+    .map((session) => `${session.paneId}:${session.attemptId}`)
+    .sort()
+    .join('|');
+}
+
+/**
+ * Whether a run's reviewer attempts changed between a captured fingerprint and a
+ * later snapshot (issue #59, blocker A-2). Synthesis re-runs the live #9 gate via
+ * an `await`; a concurrent operator reviewer relaunch can replace `run.reviewers`
+ * during that window without changing the run status (an idempotent relaunch keeps
+ * `reviewers_running`), so the status-only preemption guard would wave the stale
+ * synthesis through and let it build findings from — and transition over — the
+ * freshly relaunched reviewers while they are still running. Comparing attempt
+ * fingerprints catches exactly that, for operator- and loop-driven synthesis alike.
+ */
+export function reviewerAttemptsReplaced(
+  capturedFingerprint: string,
+  reviewers: ReviewerSessionState[] | undefined,
+): boolean {
+  return reviewerAttemptFingerprint(reviewers) !== capturedFingerprint;
 }
 
 /**

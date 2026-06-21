@@ -17,7 +17,9 @@ import {
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
+  reviewerAttemptFingerprint,
   reviewerAttemptId,
+  reviewerAttemptsReplaced,
   reviewerCommentBody,
   reviewerLaunchArgs,
   reviewerLaunchTransition,
@@ -397,4 +399,53 @@ test('reviewerAttemptId sanitizes unsafe characters so it is filename-safe', () 
   assert.ok(!id.includes('/'), 'no path separators');
   assert.ok(!id.includes('..'), 'no parent-dir segments');
   assert.match(id, /^[A-Za-z0-9_-]+$/);
+});
+
+// --- Reviewer-attempt fingerprint / relaunch detection (issue #59, A-2) -------
+// Synthesis re-runs the live #9 gate across an `await`; a concurrent operator
+// reviewer relaunch can replace `run.reviewers` during that window while keeping
+// the run in `reviewers_running` (an idempotent relaunch), so neither the status
+// guard nor the loop-generation guard catches it. Comparing attempt fingerprints
+// across the await is what aborts the stale synthesis (blocker A-2).
+
+test('reviewerAttemptFingerprint is order-independent and ignores non-attempt fields', () => {
+  const a = { paneId: 'reviewer_a', attemptId: '1-aaa-reviewer-a-t1', status: 'running' };
+  const b = { paneId: 'reviewer_b', attemptId: '1-aaa-reviewer-b-t1', status: 'completed' };
+  // Same attempts in any order produce the same fingerprint.
+  assert.equal(reviewerAttemptFingerprint([a, b]), reviewerAttemptFingerprint([b, a]));
+  // A status change (not an attempt change) does not move the fingerprint.
+  assert.equal(
+    reviewerAttemptFingerprint([a, b]),
+    reviewerAttemptFingerprint([{ ...a, status: 'completed' }, { ...b, status: 'failed' }]),
+  );
+  // No reviewers → empty fingerprint.
+  assert.equal(reviewerAttemptFingerprint([]), '');
+  assert.equal(reviewerAttemptFingerprint(undefined), '');
+});
+
+test('reviewerAttemptsReplaced: a concurrent relaunch (new attemptIds) is detected', () => {
+  const before = [
+    { paneId: 'reviewer_a', attemptId: '1-aaa-reviewer-a-t1' },
+    { paneId: 'reviewer_b', attemptId: '1-aaa-reviewer-b-t1' },
+  ];
+  const captured = reviewerAttemptFingerprint(before);
+  // No relaunch: same attempts (status may have advanced) → not replaced.
+  assert.equal(
+    reviewerAttemptsReplaced(captured, [
+      { ...before[0], status: 'completed' },
+      { ...before[1], status: 'completed' },
+    ]),
+    false,
+  );
+  // A relaunch mints fresh attemptIds for the same panes → replaced.
+  assert.equal(
+    reviewerAttemptsReplaced(captured, [
+      { paneId: 'reviewer_a', attemptId: '2-bbb-reviewer-a-t2' },
+      { paneId: 'reviewer_b', attemptId: '2-bbb-reviewer-b-t2' },
+    ]),
+    true,
+  );
+  // The sessions were cleared/replaced entirely → replaced.
+  assert.equal(reviewerAttemptsReplaced(captured, undefined), true);
+  assert.equal(reviewerAttemptsReplaced(captured, []), true);
 });

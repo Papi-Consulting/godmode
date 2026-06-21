@@ -160,7 +160,13 @@ per-launch `sessionToken` stale-callback guard is unchanged — attempt identity
 complements it (durable, head-bound) rather than replacing it (opaque,
 per-launch). The reviewer launch pane shows each attempt's cycle and target short
 SHA, and labels an attempt **stale** when its `targetHeadSha` differs from the
-current verified PR head.
+current verified PR head. That "current verified PR head" is the live #9
+verification main re-runs as the launch/synthesis gate: the `startReviewers` and
+`synthesizeReviews` IPC results carry the re-run `verification`, and the renderer
+adopts it into the same `verification` state the launch pane derives the current
+head from (as `confirmPrCandidate` already does). Dropping it would leave the pane
+comparing a freshly launched current-head attempt against an old (or `null`) head
+and mislabel it (issue #59).
 
 Each reviewer is tracked on `RunSnapshot.reviewers` with an independent status:
 `launching → running → completed → comment_posted`, or `failed`. The state is set

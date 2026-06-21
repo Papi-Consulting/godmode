@@ -106,7 +106,15 @@ It returns an ordered `reasons[]` explaining any unmet condition and a
 `handleSynthesizeReviews` runs from `reviewers_running` / `reviewers_rerunning`:
 
 1. re-run the #9 gate live and record it (with the same stale-context guard the
-   reviewer launch/comment paths use);
+   reviewer launch/comment paths use). Because that re-verification is an `await`,
+   synthesis also fingerprints the run's reviewer attempts (`reviewerAttemptFingerprint`,
+   the set of `<paneId>:<attemptId>`) *before* the await and re-checks it after
+   (`reviewerAttemptsReplaced`): a concurrent operator reviewer relaunch can replace
+   `run.reviewers` while keeping the run in `reviewers_running` (an idempotent
+   relaunch), which neither the status guard nor the loop-generation guard would
+   catch. If the attempts changed, synthesis aborts as `preempted` rather than
+   building findings from — or transitioning over — the freshly relaunched reviewers
+   while they are still running (issue #59, blocker A-2);
 2. parse each tracked reviewer's captured output;
 3. compute the merge gate;
 4. persist `RunFindings` on the run and to `.godmode/runs/<run-id>/findings.json`;

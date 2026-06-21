@@ -108,7 +108,9 @@ import {
   isReviewerRunContextStale,
   isReviewerSessionStale,
   resolveReviewerExit,
+  reviewerAttemptFingerprint,
   reviewerAttemptId,
+  reviewerAttemptsReplaced,
   reviewerCommentBody,
   reviewerLaunchArgs,
   reviewerLaunchTransition,
@@ -1708,6 +1710,14 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
   const projectRoot = captured.root;
   const now = new Date().toISOString();
 
+  // Reviewer-attempt fingerprint at synthesis start (issue #59, blocker A-2).
+  // Captured BEFORE the verification await so a concurrent operator reviewer
+  // relaunch that replaces `run.reviewers` mid-await — without leaving the
+  // reviewers-running window the status guard treats as legal — is detected and
+  // this stale synthesis aborts instead of building findings from / transitioning
+  // over freshly relaunched reviewers that are still running.
+  const reviewersFingerprint = reviewerAttemptFingerprint(run.reviewers);
+
   // #9 evidence gate: re-verify live and record it. The merge gate consumes this
   // verified status, not plain PR existence or an agent self-report. Verify against
   // the run's recorded branch (the bound #38 evidence) for both shared and worktree
@@ -1738,13 +1748,22 @@ async function handleSynthesizeReviews(actor: TransitionActor = 'operator'): Pro
   // leave the run id/root unchanged, so the stale guard above cannot catch them.
   const livePreSynth = getCurrentRun();
   const synthGenerationStale = isLoopDriven && isLoopStageGenerationStale(stageGeneration);
-  if (isLoopReviewSynthesisPreempted(livePreSynth?.status ?? null, synthGenerationStale)) {
+  // Reviewer-relaunch preemption (issue #59, blocker A-2): a concurrent operator
+  // reviewer relaunch replaced the tracked attempts during this synthesis's
+  // verification await. This holds for operator- and loop-driven synthesis alike
+  // (the relaunch can keep the run in `reviewers_running`, so neither the status
+  // guard nor the loop-generation guard catches it). Abort before writing findings
+  // or transitioning — the fresh reviewers must run to completion first.
+  const reviewersReplaced = reviewerAttemptsReplaced(reviewersFingerprint, livePreSynth?.reviewers);
+  if (reviewersReplaced || isLoopReviewSynthesisPreempted(livePreSynth?.status ?? null, synthGenerationStale)) {
     return {
       ok: false,
       code: 'preempted',
-      error: synthGenerationStale
-        ? `An operator action preempted the loop during verification (run now ${livePreSynth?.status ?? 'no run'}); reviews were not synthesized.`
-        : `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
+      error: reviewersReplaced
+        ? 'Reviewer sessions were relaunched during verification; this synthesis would consume the freshly relaunched reviewers — synthesize again once they complete.'
+        : synthGenerationStale
+          ? `An operator action preempted the loop during verification (run now ${livePreSynth?.status ?? 'no run'}); reviews were not synthesized.`
+          : `The run was preempted (now ${livePreSynth?.status ?? 'no run'}) during verification; reviews were not synthesized.`,
       run: livePreSynth,
       verification,
     };

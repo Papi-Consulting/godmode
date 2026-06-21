@@ -373,6 +373,11 @@ export function App() {
       const result = await window.godmode.startReviewers();
       if (seq !== runRequestSeq.current) return;
       if (result.run) setRun(result.run);
+      // Adopt the live #9 verification main re-ran as the launch gate (issue #59):
+      // the launch pane derives the current PR head it labels attempts stale
+      // against from this state, so dropping it would compare new current-head
+      // attempts against a stale head and mislabel them. Mirrors confirmPrCandidate.
+      if (result.verification) setVerification(result.verification);
       setStartReviewersError(result.ok ? null : result.error);
     } finally {
       setStartingReviewers(false);
@@ -401,6 +406,10 @@ export function App() {
       const result = await window.godmode.synthesizeReviews();
       if (seq !== runRequestSeq.current) return;
       if (result.run) setRun(result.run);
+      // Adopt the live #9 verification main re-ran as the synthesis gate (issue
+      // #59) so the launch pane's current-head labeling stays aligned with the
+      // same live PR head main synthesized against, instead of a stale state.
+      if (result.verification) setVerification(result.verification);
       setFixHandoff(result.ok ? result.fixHandoff ?? null : null);
       setSynthError(result.ok ? null : result.error);
     } finally {
