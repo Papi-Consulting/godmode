@@ -310,7 +310,9 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
   if (branch) args.push(branch);
   args.push(
     '--json',
-    'number,title,state,updatedAt,headRefName,isDraft,reviewDecision,url,reviews,comments,statusCheckRollup',
+    // Issue #61: `headRefOid` so the refresh observes the live PR head and main can
+    // reconcile it against the run's latest recorded verification (stale on drift).
+    'number,title,state,updatedAt,headRefName,headRefOid,isDraft,reviewDecision,url,reviews,comments,statusCheckRollup',
   );
   const result = await runGh(args, cwd);
   if (!result.ok) {
@@ -331,6 +333,7 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
     state: string;
     updatedAt: string;
     headRefName: string;
+    headRefOid?: string;
     isDraft?: boolean;
     reviewDecision?: string;
     url?: string;
@@ -368,6 +371,7 @@ async function fetchActivePr(cwd: string, branch: string | null): Promise<Fetche
       state: raw.state,
       updatedAt: raw.updatedAt,
       headRefName: raw.headRefName,
+      headSha: raw.headRefOid ?? '',
       isDraft: Boolean(raw.isDraft),
       reviewDecision: raw.reviewDecision ?? '',
       url: raw.url ?? '',

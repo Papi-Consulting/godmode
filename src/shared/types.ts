@@ -358,6 +358,13 @@ export type GithubCheck = {
 /** The PR (if any) whose head matches the selected repo's current branch. */
 export type GithubActivePullRequest = GithubPullRequest & {
   url: string;
+  /**
+   * Remote PR head commit SHA (`headRefOid`), read live from GitHub. Issue #61:
+   * the GitHub refresh observes this head, so main can reconcile it against the
+   * run's latest recorded verification and stale the displayed evidence as soon as
+   * the bound PR head moves — without waiting for a manual re-verify.
+   */
+  headSha: string;
   reviews: GithubReview[];
   comments: GithubComment[];
   checks: GithubCheck[];
@@ -1085,6 +1092,27 @@ export type RunVerificationResult = {
   verification: CommitVerification;
   run: RunSnapshot | null;
 };
+
+/**
+ * Result of the operator-initiated "adopt current head" recovery (issue #61). When
+ * a follow-up push has moved the bound PR head, the run's recorded expected commit
+ * is stale and every re-verify/reviewer-launch keeps deriving `stale_head`. This
+ * guarded path re-records the live PR head as the run's expected commit and
+ * re-verifies against it, so the run can move forward on the actual current head.
+ * The adoption is refused (and nothing recorded) unless main confirms the live PR
+ * still matches the bound run's PR number/branch, so a closed/replaced PR or a
+ * project switch mid-flight can never silently retarget the run.
+ */
+export type AdoptHeadResult =
+  | { ok: true; run: RunSnapshot; verification: CommitVerification }
+  | {
+      ok: false;
+      code: 'no_run' | 'no_pr_bound' | 'pr_mismatch' | 'not_drifted' | 'invalid_state';
+      error: string;
+      run: RunSnapshot | null;
+      /** The live verification main read while evaluating the request, when available. */
+      verification?: CommitVerification;
+    };
 
 /**
  * Lifecycle of a single tracked reviewer session (issue #10).

@@ -55,6 +55,12 @@ type VerificationPaneProps = {
   /** Whether a run is bound, so results are recorded to its history. */
   hasRun: boolean;
   onVerify: () => void;
+  /** Issue #61: adopt the live bound PR head as the run's expected commit. */
+  onAdoptHead?: () => void;
+  /** Whether an adopt-head recovery is in flight. */
+  adopting?: boolean;
+  /** Last adopt-head rejection reason, surfaced inline. */
+  adoptError?: string | null;
 };
 
 /**
@@ -65,8 +71,20 @@ type VerificationPaneProps = {
  * all visible so the operator can audit *why* a run is (or is not) verified
  * before any merge-ready decision consumes this state.
  */
-export function VerificationPane({ verification, loading, hasRun, onVerify }: VerificationPaneProps) {
+export function VerificationPane({
+  verification,
+  loading,
+  hasRun,
+  onVerify,
+  onAdoptHead,
+  adopting = false,
+  adoptError = null,
+}: VerificationPaneProps) {
   const v = verification;
+  // Issue #61: a `stale_head` run is stuck — a follow-up push moved the bound PR head
+  // and re-verify keeps re-deriving stale against the old commit. Offer the guarded
+  // "adopt current head" recovery only in that state (and only with a bound run).
+  const canAdoptHead = Boolean(onAdoptHead) && hasRun && v?.status === 'stale_head';
   return (
     <section className="stack-section verify-pane" aria-label="Commit verification">
       <header>
@@ -157,15 +175,28 @@ export function VerificationPane({ verification, loading, hasRun, onVerify }: Ve
             {v.message}
           </p>
 
+          {adoptError ? (
+            <p className="run-reason error" role="status">
+              {adoptError}
+            </p>
+          ) : null}
+
           <div className="verify-footer">
             <span className="verify-meta">
               {v.mergeConfirmed ? 'merge confirmed · ' : ''}
               {hasRun ? 'recorded to run · ' : ''}
               updated {relativeTime(v.fetchedAt) || 'now'}
             </span>
-            <button onClick={onVerify} disabled={loading}>
-              {loading ? 'Verifying…' : 'Re-verify'}
-            </button>
+            <div className="verify-actions">
+              {canAdoptHead ? (
+                <button onClick={onAdoptHead} disabled={adopting || loading}>
+                  {adopting ? 'Adopting…' : 'Adopt current head'}
+                </button>
+              ) : null}
+              <button onClick={onVerify} disabled={loading || adopting}>
+                {loading ? 'Verifying…' : 'Re-verify'}
+              </button>
+            </div>
           </div>
         </>
       ) : (

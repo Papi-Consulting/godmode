@@ -19,6 +19,7 @@ import type {
   TransitionActor,
   WorkspaceIsolation,
 } from '../shared/types.js';
+import { commitMatches } from './verify.js';
 
 /**
  * In-memory run state machine for the GodMode issue-to-PR workflow.
@@ -554,6 +555,64 @@ export function recordVerification(run: RunSnapshot, verification: CommitVerific
 export function recordCurrentRunVerification(verification: CommitVerification): RunSnapshot | null {
   if (!currentRun) return null;
   setCurrentRun(recordVerification(currentRun, verification));
+  return currentRun;
+}
+
+/** The run's most recently recorded verification entry, or null when none. */
+export function latestRunVerification(run: RunSnapshot): RunVerificationLogEntry | null {
+  return run.verifications.length > 0 ? run.verifications[run.verifications.length - 1] : null;
+}
+
+/**
+ * Whether a newly observed bound-PR head differs from the head the run's latest
+ * recorded verification was computed against (issue #61). This is the trigger for
+ * automatic stale-marking: when GodMode observes the bound PR (via GitHub refresh,
+ * discovery, or any other read) at a head SHA that no longer matches the recorded
+ * `verifiedHeadSha`, the displayed evidence is for a stale head and must be
+ * re-derived (it will become `stale_head` against the now-old expected commit)
+ * before any gate trusts it. Pure and Electron-free so the trigger is unit-tested.
+ *
+ * Returns true only when (a) the run is bound to `observedPrNumber`, (b) a prior
+ * verification recorded a `verifiedHeadSha`, and (c) the observed head differs from
+ * it. A run with no recorded verification, or one not bound to the observed PR,
+ * never drifts (there is no current-head claim to invalidate).
+ */
+export function observedHeadDrifted(
+  run: RunSnapshot,
+  observedPrNumber: number | undefined,
+  observedHeadSha: string | null | undefined,
+): boolean {
+  if (!observedHeadSha) return false;
+  if (run.prNumber === undefined || observedPrNumber === undefined || run.prNumber !== observedPrNumber) {
+    return false;
+  }
+  const latest = latestRunVerification(run);
+  if (!latest || !latest.verifiedHeadSha) return false;
+  return !commitMatches(latest.verifiedHeadSha, observedHeadSha);
+}
+
+/**
+ * Adopt an observed PR head as the run's expected commit (issue #61 recovery),
+ * returning a new snapshot (the input is never mutated). After a follow-up push
+ * moves the head, the run's recorded expected commit is stale and every
+ * re-verify/reviewer-launch keeps deriving `stale_head`; this re-records the new
+ * head so a deliberate, guarded operator action (the caller verifies live and
+ * confirms the bound PR still matches) can move the run forward on the current
+ * head. The re-verification recorded immediately afterward is the audit trail —
+ * it captures the new head and that it is now current-head verified.
+ */
+export function adoptExpectedCommit(run: RunSnapshot, commit: string, now?: string): RunSnapshot {
+  const at = now ?? new Date().toISOString();
+  return { ...run, expectedCommit: commit, updatedAt: at };
+}
+
+/**
+ * Adopt an observed head as the current run's expected commit (controller
+ * wrapper). Returns the updated snapshot, or null when there is no active run.
+ */
+export function adoptCurrentRunExpectedCommit(commit: string, now?: string): RunSnapshot | null {
+  if (!currentRun) return null;
+  setCurrentRun(adoptExpectedCommit(currentRun, commit, now));
   return currentRun;
 }
 
