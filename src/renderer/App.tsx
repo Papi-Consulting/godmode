@@ -51,6 +51,15 @@ const PHASE_BY_PANE: Record<AgentRole, string> = {
 // Mirrors TERMINAL_STATUSES in src/main/run.ts, which is the authoritative guard.
 const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['closed', 'cancelled', 'karan_merged']);
 
+type AppView = 'dashboard' | 'workspace' | 'pull_requests' | 'settings';
+
+const NAV_ITEMS: { id: AppView; label: string; shortLabel: string }[] = [
+  { id: 'dashboard', label: 'Dashboard', shortLabel: 'D' },
+  { id: 'workspace', label: 'Agent workspace', shortLabel: 'A' },
+  { id: 'pull_requests', label: 'Pull requests', shortLabel: 'PR' },
+  { id: 'settings', label: 'Settings', shortLabel: 'S' },
+];
+
 const chatEvents = [
   {
     time: '19:42',
@@ -79,6 +88,7 @@ const chatEvents = [
 ];
 
 export function App() {
+  const [activeView, setActiveView] = useState<AppView>('workspace');
   const [config, setConfig] = useState<ProjectConfigState | null>(null);
   const [appRepo, setAppRepo] = useState<AppRepoState | null>(null);
   const [project, setProject] = useState<ProjectState | null>(null);
@@ -568,7 +578,7 @@ export function App() {
     // the fresh result. Treat it as authoritative so the pane stales (to
     // `stale_head`) immediately, without waiting for a manual re-verify; bump the
     // seq so an older in-flight verify fetch can't overwrite this newer evidence.
-    const offVerification = window.godmode?.onVerificationChanged((next) => {
+    const offVerification = window.godmode?.onVerificationChanged?.((next) => {
       runRequestSeq.current += 1;
       setVerification(next ?? null);
     });
@@ -640,23 +650,32 @@ export function App() {
     worktreePath: pane.paneId === 'builder' ? run?.worktree?.path : undefined,
   }));
   const bindingSummary = rolePanes.map((pane) => `${pane.paneId}: ${pane.agentId}`).join(' · ');
+  const selectionLocked = run !== null && !TERMINAL_RUN_STATUSES.has(run.status);
+  const latestTransition = run?.log.length ? run.log[run.log.length - 1] : null;
+  const configChipTone =
+    config?.status === 'loaded' ? 'success' : config?.status === 'invalid' || config?.status === 'unreadable' ? 'error' : 'warn';
+  const configStatusLabel = config
+    ? config.source === 'config'
+      ? 'config loaded'
+      : `${config.status} defaults`
+    : 'config loading';
 
   return (
     <div className="app-frame">
       <aside className="rail" aria-label="Project switcher">
         <div className="rail-mark">GM</div>
-        <button className="rail-button" aria-label="Dashboard">
-          D
-        </button>
-        <button className="rail-button active" aria-label="Agent workspace">
-          A
-        </button>
-        <button className="rail-button" aria-label="Pull requests">
-          PR
-        </button>
-        <button className="rail-button" aria-label="Settings">
-          S
-        </button>
+        {NAV_ITEMS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`rail-button ${activeView === item.id ? 'active' : ''}`}
+            aria-label={item.label}
+            aria-current={activeView === item.id ? 'page' : undefined}
+            onClick={() => setActiveView(item.id)}
+          >
+            {item.shortLabel}
+          </button>
+        ))}
       </aside>
 
       <main className="app-shell">
@@ -680,169 +699,325 @@ export function App() {
 
         <ProjectBar />
 
-        <section className="dashboard-grid" aria-label="GodMode agent workspace">
-          <section className="panel chat-panel">
-            <header className="panel-header">
-              <div>
-                <span className="section-kicker">Harness Chat</span>
-                <strong>Team Control</strong>
-              </div>
-              <span className="header-chip">operator draft</span>
-            </header>
-            <div className="chat-log" aria-label="Team chat transcript">
-              {chatEvents.map((event) => (
-                <article className="chat-line" key={`${event.time}-${event.from}`}>
-                  <time>{event.time}</time>
-                  <span className={`mention mention-${event.from}`}>{event.from}</span>
-                  <span className="chat-target">{event.to}</span>
-                  <p>{event.body}</p>
-                </article>
-              ))}
-            </div>
-            {/* Harness team chat is not implemented (a persistent transcript/chat
-                server is out of scope for #57). Keep the control visibly disabled
-                rather than accepting text it cannot dispatch. To message a live
-                agent today, use a role pane's "Message <role>" control. */}
-            <div className="chat-input-row">
-              <input
-                aria-label="Chat message"
-                placeholder="Team chat not yet wired — use a role pane's Message control"
-                disabled
-                title="Harness team chat is not implemented yet. Use a role pane's Message control to reach a live agent."
-              />
-              <button disabled>Send</button>
-            </div>
-            <div className="chat-controls" aria-label="Local run controls">
-              <div>
-                <span className="section-kicker">Server</span>
-                <div className="button-row">
-                  <button>Stop</button>
-                  <button>Restart</button>
-                  <button>Reset agents</button>
+        {activeView === 'dashboard' ? (
+          <section className="view-grid dashboard-view" aria-label="GodMode dashboard">
+            <section className="panel summary-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Run overview</span>
+                  <strong>{run ? STATUS_LABEL[run.status] : 'No active run'}</strong>
                 </div>
-              </div>
-              <div>
-                <span className="section-kicker">Keep Mac Awake</span>
-                <p>Active for 2h 2m</p>
-                <button className="primary-action">Awake 2h</button>
-              </div>
-              <div>
-                <span className="section-kicker">Notifications</span>
-                <div className="inline-controls">
-                  <button className="primary-action">Sound</button>
-                  <select aria-label="Notification sound" defaultValue="warm-bell">
-                    <option value="warm-bell">Warm bell</option>
-                    <option value="soft-ping">Soft ping</option>
-                  </select>
+                <span className={`header-chip ${run ? '' : 'warn'}`}>{run ? `cycle ${run.cycle}/${run.maxCycles}` : 'idle'}</span>
+              </header>
+              <dl className="summary-list">
+                <div>
+                  <dt>Source</dt>
+                  <dd>{run?.issueNumber ? `#${run.issueNumber} ${run.issueTitle ?? ''}` : run?.issueTitle ?? 'No issue or task selected'}</dd>
                 </div>
-              </div>
-            </div>
-          </section>
+                <div>
+                  <dt>Branch</dt>
+                  <dd>{run?.branch ?? '-'}</dd>
+                </div>
+                <div>
+                  <dt>PR</dt>
+                  <dd>{run?.prNumber !== undefined ? `#${run.prNumber}` : '-'}</dd>
+                </div>
+                <div>
+                  <dt>Isolation</dt>
+                  <dd>{run?.isolation ?? '-'}</dd>
+                </div>
+                <div>
+                  <dt>Worktree</dt>
+                  <dd>{run?.worktree?.path ?? (run?.isolation === 'worktree' ? 'pending' : '-')}</dd>
+                </div>
+                <div>
+                  <dt>Last transition</dt>
+                  <dd>
+                    {latestTransition
+                      ? `${STATUS_LABEL[latestTransition.from]} -> ${STATUS_LABEL[latestTransition.to]} (${latestTransition.action})`
+                      : '-'}
+                  </dd>
+                </div>
+              </dl>
+            </section>
 
-          <section className="panel terminals-panel">
-            <header className="panel-header">
-              <div>
-                <span className="section-kicker">Agent Terminals</span>
-                <strong>Role-bound CLIs</strong>
-              </div>
-              {config ? (
-                <span className={`header-chip ${config.status === 'loaded' ? 'success' : ''}`}>
-                  {config.source === 'config' ? 'config loaded' : `${config.status} · defaults`}
+            <section className="panel summary-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Operated project</span>
+                  <strong>{project?.isAppRepo ? 'Dogfooding' : 'Project'}</strong>
+                </div>
+                <span className={`header-chip ${project?.harness.status === 'valid' ? 'success' : 'warn'}`}>
+                  {project?.harness.status === 'valid' ? 'harness valid' : 'harness check'}
                 </span>
-              ) : null}
-            </header>
-            {config?.error ? (
-              <p className="config-error" role="alert">
-                {config.error}
-              </p>
-            ) : null}
-            <div className="terminal-grid">
-              {panes.map((pane) => (
-                <AgentPane key={pane.id} {...pane} session={ptyStates[pane.id] ?? null} />
-              ))}
-            </div>
-          </section>
-
-          <GithubPane
-            activeIssueNumber={run?.issueNumber ?? null}
-            selectionLocked={run !== null && !TERMINAL_RUN_STATUSES.has(run.status)}
-            onSelectIssue={selectIssue}
-          />
-
-          <section className="operator-grid" aria-label="Operator features">
-            <CommandPreviewPane />
-
-            <section className="panel side-stack">
-              <div className="stack-section">
-                <header>
-                  <span className="section-kicker">Agent Models</span>
-                  <button>Configure</button>
-                </header>
-                <p>{bindingSummary ? `bindings · ${bindingSummary}` : 'no role bindings loaded'}</p>
-              </div>
-              <HandoffPane
-                run={run}
-                selectionLocked={run !== null && !TERMINAL_RUN_STATUSES.has(run.status)}
-                onCreateManualTask={createManualTask}
-                onSend={sendHandoff}
-                sendError={sendError}
-                builderRecovery={builderRecovery}
-              />
-              <RunControlPane
-                run={run}
-                error={runError}
-                loop={loop}
-                onSetLoopMode={setLoopMode}
-                onDispatch={dispatchRun}
-                onClear={clearRun}
-                discovery={discovery}
-                discoveryHint={discoveryHint}
-                discovering={discovering}
-                onDiscoverPr={discoverPr}
-                onConfirmCandidate={confirmPrCandidate}
-                isAppRepo={project?.isAppRepo ?? false}
-                onSetIsolation={setIsolation}
-                orphanWorktrees={worktrees}
-                onCleanupWorktree={cleanupWorktree}
-                worktreeMessage={worktreeMessage}
-                resumeState={resumeState}
-                onResume={resumeRun}
-                onDiscard={discardRun}
-                resumeBusy={resumeBusy}
-                builderRecovery={builderRecovery}
-                onRelaunchBuilder={relaunchBuilder}
-                relaunchingBuilder={relaunchingBuilder}
-              />
-              <VerificationPane
-                verification={verification}
-                loading={verifying}
-                hasRun={run !== null}
-                onVerify={verifyCommit}
-                onAdoptHead={adoptHead}
-                adopting={adoptingHead}
-                adoptError={adoptHeadError}
-              />
-              <ReviewLaunchPane
-                run={run}
-                startError={startReviewersError}
-                starting={startingReviewers}
-                currentHeadSha={verification?.pr?.headSha ?? null}
-                currentHeadShaShort={verification?.pr?.headShaShort ?? null}
-                onStart={startReviewers}
-                onPostComment={postReviewerComment}
-              />
-              <ReviewSynthesisPane
-                run={run}
-                fixHandoff={fixHandoff}
-                synthesizing={synthesizing}
-                sendingFix={sendingFix}
-                error={synthError}
-                onSynthesize={synthesizeReviews}
-                onSendFix={sendFix}
-              />
+              </header>
+              <dl className="summary-list">
+                <div>
+                  <dt>Root</dt>
+                  <dd>{project?.root ?? 'No project selected'}</dd>
+                </div>
+                <div>
+                  <dt>Mode</dt>
+                  <dd>{project?.isAppRepo ? 'GodMode app repo and operated project share the same checkout' : 'External operated project'}</dd>
+                </div>
+                <div>
+                  <dt>Config</dt>
+                  <dd>{configStatusLabel}</dd>
+                </div>
+                <div>
+                  <dt>Role bindings</dt>
+                  <dd>{bindingSummary || 'No role bindings loaded'}</dd>
+                </div>
+              </dl>
             </section>
           </section>
+        ) : null}
+
+        <section className="dashboard-grid" aria-label="GodMode agent workspace" hidden={activeView !== 'workspace'}>
+            <section className="panel chat-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Harness Chat</span>
+                  <strong>Team Control</strong>
+                </div>
+                <span className="header-chip">operator draft</span>
+              </header>
+              <div className="chat-log" aria-label="Team chat transcript">
+                {chatEvents.map((event) => (
+                  <article className="chat-line" key={`${event.time}-${event.from}`}>
+                    <time>{event.time}</time>
+                    <span className={`mention mention-${event.from}`}>{event.from}</span>
+                    <span className="chat-target">{event.to}</span>
+                    <p>{event.body}</p>
+                  </article>
+                ))}
+              </div>
+              {/* Harness team chat is not implemented (a persistent transcript/chat
+                  server is out of scope for #57). Keep the control visibly disabled
+                  rather than accepting text it cannot dispatch. To message a live
+                  agent today, use a role pane's "Message <role>" control. */}
+              <div className="chat-input-row">
+                <input
+                  aria-label="Chat message"
+                  placeholder="Team chat not yet wired — use a role pane's Message control"
+                  disabled
+                  title="Harness team chat is not implemented yet. Use a role pane's Message control to reach a live agent."
+                />
+                <button disabled>Send</button>
+              </div>
+              <div className="chat-controls" aria-label="Local run controls">
+                <div>
+                  <span className="section-kicker">Server</span>
+                  <div className="button-row">
+                    <button>Stop</button>
+                    <button>Restart</button>
+                    <button>Reset agents</button>
+                  </div>
+                </div>
+                <div>
+                  <span className="section-kicker">Keep Mac Awake</span>
+                  <p>Active for 2h 2m</p>
+                  <button className="primary-action">Awake 2h</button>
+                </div>
+                <div>
+                  <span className="section-kicker">Notifications</span>
+                  <div className="inline-controls">
+                    <button className="primary-action">Sound</button>
+                    <select aria-label="Notification sound" defaultValue="warm-bell">
+                      <option value="warm-bell">Warm bell</option>
+                      <option value="soft-ping">Soft ping</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="panel terminals-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Agent Terminals</span>
+                  <strong>Role-bound CLIs</strong>
+                </div>
+                {config ? <span className={`header-chip ${config.status === 'loaded' ? 'success' : ''}`}>{configStatusLabel}</span> : null}
+              </header>
+              {config?.error ? (
+                <p className="config-error" role="alert">
+                  {config.error}
+                </p>
+              ) : null}
+              <div className="terminal-grid">
+                {panes.map((pane) => (
+                  <AgentPane key={pane.id} {...pane} session={ptyStates[pane.id] ?? null} />
+                ))}
+              </div>
+            </section>
+
+            <GithubPane activeIssueNumber={run?.issueNumber ?? null} selectionLocked={selectionLocked} onSelectIssue={selectIssue} />
+
+            <section className="operator-grid" aria-label="Operator features">
+              <CommandPreviewPane />
+
+              <section className="panel side-stack">
+                <div className="stack-section">
+                  <header>
+                    <span className="section-kicker">Agent Models</span>
+                    <button type="button" onClick={() => setActiveView('settings')}>
+                      Configure
+                    </button>
+                  </header>
+                  <p>{bindingSummary ? `bindings · ${bindingSummary}` : 'no role bindings loaded'}</p>
+                </div>
+                <HandoffPane
+                  run={run}
+                  selectionLocked={selectionLocked}
+                  onCreateManualTask={createManualTask}
+                  onSend={sendHandoff}
+                  sendError={sendError}
+                  builderRecovery={builderRecovery}
+                />
+                <RunControlPane
+                  run={run}
+                  error={runError}
+                  loop={loop}
+                  onSetLoopMode={setLoopMode}
+                  onDispatch={dispatchRun}
+                  onClear={clearRun}
+                  discovery={discovery}
+                  discoveryHint={discoveryHint}
+                  discovering={discovering}
+                  onDiscoverPr={discoverPr}
+                  onConfirmCandidate={confirmPrCandidate}
+                  isAppRepo={project?.isAppRepo ?? false}
+                  onSetIsolation={setIsolation}
+                  orphanWorktrees={worktrees}
+                  onCleanupWorktree={cleanupWorktree}
+                  worktreeMessage={worktreeMessage}
+                  resumeState={resumeState}
+                  onResume={resumeRun}
+                  onDiscard={discardRun}
+                  resumeBusy={resumeBusy}
+                  builderRecovery={builderRecovery}
+                  onRelaunchBuilder={relaunchBuilder}
+                  relaunchingBuilder={relaunchingBuilder}
+                />
+                <VerificationPane
+                  verification={verification}
+                  loading={verifying}
+                  hasRun={run !== null}
+                  onVerify={verifyCommit}
+                  onAdoptHead={adoptHead}
+                  adopting={adoptingHead}
+                  adoptError={adoptHeadError}
+                />
+                <ReviewLaunchPane
+                  run={run}
+                  startError={startReviewersError}
+                  starting={startingReviewers}
+                  currentHeadSha={verification?.pr?.headSha ?? null}
+                  currentHeadShaShort={verification?.pr?.headShaShort ?? null}
+                  onStart={startReviewers}
+                  onPostComment={postReviewerComment}
+                />
+                <ReviewSynthesisPane
+                  run={run}
+                  fixHandoff={fixHandoff}
+                  synthesizing={synthesizing}
+                  sendingFix={sendingFix}
+                  error={synthError}
+                  onSynthesize={synthesizeReviews}
+                  onSendFix={sendFix}
+                />
+              </section>
+            </section>
         </section>
+
+        {activeView === 'pull_requests' ? (
+          <section className="view-grid single-panel-view" aria-label="GodMode pull requests">
+            <GithubPane activeIssueNumber={run?.issueNumber ?? null} selectionLocked={selectionLocked} onSelectIssue={selectIssue} />
+          </section>
+        ) : null}
+
+        {activeView === 'settings' ? (
+          <section className="view-grid settings-view" aria-label="GodMode settings">
+            <section className="panel settings-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Settings</span>
+                  <strong>Role configuration</strong>
+                </div>
+                <span className={`header-chip ${configChipTone}`}>{configStatusLabel}</span>
+              </header>
+              <dl className="summary-list">
+                <div>
+                  <dt>Project</dt>
+                  <dd>{config?.projectName ?? project?.root ?? 'No project selected'}</dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{config?.source === 'config' ? '.agentic/godmode.yaml' : 'built-in defaults'}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{config?.status ?? 'loading'}</dd>
+                </div>
+                <div>
+                  <dt>Edit path</dt>
+                  <dd>{project?.root ? `${project.root}/.agentic/godmode.yaml` : '.agentic/godmode.yaml'}</dd>
+                </div>
+              </dl>
+              {config?.error ? (
+                <p className="config-error" role="alert">
+                  {config.error}
+                </p>
+              ) : null}
+              <p className="settings-note">
+                In-app editing is not wired yet. Edit the project config file directly, then reload or switch projects to refresh these bindings.
+              </p>
+            </section>
+
+            <section className="panel settings-panel role-bindings-panel">
+              <header className="panel-header">
+                <div>
+                  <span className="section-kicker">Agent models</span>
+                  <strong>Role bindings</strong>
+                </div>
+                <span className="header-chip">{rolePanes.length} roles</span>
+              </header>
+              {rolePanes.length > 0 ? (
+                <div className="role-binding-list">
+                  {rolePanes.map((pane) => (
+                    <article className="role-binding-row" key={pane.paneId}>
+                      <div>
+                        <span className="section-kicker">{pane.roleLabel}</span>
+                        <strong>{pane.displayName}</strong>
+                      </div>
+                      <dl>
+                        <div>
+                          <dt>Role key</dt>
+                          <dd>{pane.roleKey}</dd>
+                        </div>
+                        <div>
+                          <dt>Agent id</dt>
+                          <dd>{pane.agentId}</dd>
+                        </div>
+                        <div>
+                          <dt>Command</dt>
+                          <dd>{pane.commandHint}</dd>
+                        </div>
+                        <div>
+                          <dt>Role doc</dt>
+                          <dd>{pane.roleDoc ?? '-'}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-line">No role bindings loaded.</p>
+              )}
+            </section>
+          </section>
+        ) : null}
 
         {/* Global command routing (product spec 6.5) is not implemented: there is
             no designed rule mapping free text to a target role's live PTY. Rather
