@@ -22,6 +22,62 @@ export type PtyWriteResult =
   | { ok: false; paneId: string; code: PtyWriteFailureCode; error: string };
 
 /**
+ * Lifecycle of a generic role pane's PTY session (issue #63). The live PTY
+ * sessions live only in main's process memory, so the renderer used to infer pane
+ * status from its own optimistic button clicks (`idle`/`running`) — which collapsed
+ * materially different states (a one-shot reviewer that exited, a failed launch, a
+ * still-running agent) into the same look. This is the single source of truth,
+ * tracked in main and pushed to the renderer so pane headers, Start/Restart/Stop
+ * controls, and message inputs reflect the real process state. Role-generic
+ * (`head`/`builder`/`reviewer_a`/`reviewer_b`); vendor names never appear here.
+ *
+ * - `never_started`: no session has been launched for this pane (this app session).
+ * - `running`: a live PTY exists for the pane.
+ * - `exited`: the process ended on its own (carries the exit code) — e.g. a
+ *   one-shot reviewer finished, or a long-running agent quit.
+ * - `stopped`: the operator stopped it, or a project switch / app quit tore it
+ *   down. No live process exists; distinct from `exited` so the UI can tell an
+ *   operator-ended session apart from a process that ended itself.
+ * - `failed`: the launch itself failed (command not found, bad cwd, spawn error);
+ *   carries a visible reason. No live process exists.
+ */
+export type PaneSessionLifecycle = 'never_started' | 'running' | 'exited' | 'stopped' | 'failed';
+
+/**
+ * Renderer-facing snapshot of one role pane's PTY session lifecycle (issue #63).
+ * Serializable; carries enough metadata for display and debugging. Produced in
+ * main from the live PTY registry, never inferred in the renderer.
+ */
+export type PaneSessionState = {
+  paneId: AgentRole;
+  lifecycle: PaneSessionLifecycle;
+  /** Convenience for the UI: true only when a live PTY exists (`running`). */
+  live: boolean;
+  /** OS pid while live, else null. */
+  pid: number | null;
+  /** Exit code once the process has exited on its own, else null. */
+  exitCode: number | null;
+  /** Exit signal number when the process was killed by a signal, else null. */
+  signal: number | null;
+  /** Resolved launch cwd of the (last) session, for display/debug, else null. */
+  cwd: string | null;
+  /** Visible reason for a `failed` lifecycle, else null. */
+  error: string | null;
+  /**
+   * Conservative operator-attention flag (issue #63 scope 3). True when a live
+   * session's recent output matched a generic, documented permission/confirmation
+   * prompt pattern, so the operator may need to respond. Deliberately heuristic
+   * and best-effort: it never gates delivery, only surfaces a "needs operator"
+   * hint, and clears as soon as more output arrives or input is sent. No
+   * vendor-specific policy lives in the core lifecycle — see
+   * `detectPromptAttention` in src/main/pty.ts.
+   */
+  awaitingInput: boolean;
+  /** ISO timestamp of the last lifecycle/attention change (main owns the clock). */
+  changedAt: string;
+};
+
+/**
  * Workspace isolation mode for a run's builder/fix sessions (issue #41).
  * - `shared`: builder works directly in the operated-project checkout (today's
  *   behavior, the default for one release of soak time).

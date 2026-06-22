@@ -63,6 +63,11 @@ export const GODMODE_IPC = {
   // Pushed when main starts a PTY on the pane's behalf (e.g. builder recovery
   // relaunch, issue #55) so the pane reflects the live session it did not start.
   ptyStarted: 'godmode:pty:started',
+  // Pane session-state lifecycle truth (issue #63): `ptyStateGet` returns the full
+  // snapshot on demand; `ptyState` is pushed on every lifecycle/attention change so
+  // pane headers, controls, and message inputs reflect real process state.
+  ptyStateGet: 'godmode:pty:state:get',
+  ptyState: 'godmode:pty:state',
 } as const;
 
 export type GodmodeIpcChannel = (typeof GODMODE_IPC)[keyof typeof GODMODE_IPC];

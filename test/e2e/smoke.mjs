@@ -198,7 +198,8 @@ async function run() {
       const api = window.godmode;
       if (!api) return { present: false, missing: ['<window.godmode is undefined>'] };
       const expected = ['getApp', 'getProject', 'selectProject', 'getConfig', 'getGithub', 'getRun',
-        'selectManualTask', 'selectIssueRun', 'getHandoff', 'sendHandoff', 'startPty', 'onPtyData', 'onPtyExit'];
+        'selectManualTask', 'selectIssueRun', 'getHandoff', 'sendHandoff', 'startPty', 'onPtyData', 'onPtyExit',
+        'getPtyStates', 'onPtyState'];
       const missing = expected.filter((name) => typeof api[name] !== 'function');
       return { present: true, missing };
     });
@@ -305,6 +306,28 @@ async function run() {
     );
     assert.equal(pty.exit.exitCode, 0, 'The fake builder session should exit cleanly (0).');
     log('✓ [7] builder PTY launched in the operated-project root, emitted marker, exited cleanly.');
+
+    // --- Assertion 7b: pane session-state lifecycle truth (issue #63) ----------
+    // After the one-shot fake builder exits, main must report the builder pane as
+    // `exited` with the real exit code — not a live "running"/"watching" pane — and
+    // the renderer must disable the message Send control (no live PTY to deliver to).
+    await waitFor(page, 'the builder pane session-state to settle on exited', () =>
+      window.godmode.getPtyStates().then((states) => {
+        const builder = states.find((s) => s.paneId === 'builder');
+        return builder?.lifecycle === 'exited' && builder?.live === false;
+      }));
+    const sessionTruth = await page.evaluate(async () => {
+      const states = await window.godmode.getPtyStates();
+      const builder = states.find((s) => s.paneId === 'builder');
+      const sendDisabled = document
+        .querySelector('button[aria-label="Send message to BUILDER"]')
+        ?.hasAttribute('disabled');
+      return { lifecycle: builder?.lifecycle, exitCode: builder?.exitCode, sendDisabled };
+    });
+    assert.equal(sessionTruth.lifecycle, 'exited', 'Builder pane should report `exited` after the one-shot CLI ends.');
+    assert.equal(sessionTruth.exitCode, 0, 'Builder pane session-state should carry the real exit code (0).');
+    assert.equal(sessionTruth.sendDisabled, true, 'Message Send must be disabled when the pane has no live PTY.');
+    log('✓ [7b] builder pane reflects exited session-state; Send disabled with no live PTY.');
 
     // --- Assertion 8: run + handoff binding -----------------------------------
     // Manual task: creates a run, handoff binds to it, but send is blocked

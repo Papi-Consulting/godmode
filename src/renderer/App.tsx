@@ -8,6 +8,7 @@ import type {
   LoopMode,
   LoopState,
   ManagedWorktree,
+  PaneSessionState,
   PrCandidate,
   PrDiscoveryResult,
   ProjectConfigState,
@@ -94,6 +95,10 @@ export function App() {
   const [worktrees, setWorktrees] = useState<ManagedWorktree[]>([]);
   const [worktreeMessage, setWorktreeMessage] = useState<string | null>(null);
   const [run, setRun] = useState<RunSnapshot | null>(null);
+  // Pane PTY session-state lifecycle truth (issue #63), keyed by pane id. Main is
+  // authoritative: it pushes the full snapshot on every lifecycle/attention change,
+  // so panes reflect running/exited/stopped/failed/waiting instead of guessing.
+  const [ptyStates, setPtyStates] = useState<Record<string, PaneSessionState>>({});
   const [loop, setLoop] = useState<LoopState | null>(null);
   const [resumeState, setResumeState] = useState<RunResumeState | null>(null);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -612,6 +617,26 @@ export function App() {
     };
   }, []);
 
+  // Track pane PTY session-state lifecycle (issue #63). Main pushes the full
+  // snapshot on every change; fetch once on mount and adopt every push as
+  // authoritative. A project switch tears down sessions (main pushes the `stopped`
+  // snapshot), so no extra refetch is needed beyond the initial load.
+  useEffect(() => {
+    let active = true;
+    const toRecord = (states: PaneSessionState[]) =>
+      Object.fromEntries(states.map((state) => [state.paneId, state]));
+    void window.godmode?.getPtyStates?.().then((states) => {
+      if (active && states) setPtyStates(toRecord(states));
+    });
+    const off = window.godmode?.onPtyState?.((states) => {
+      if (active && states) setPtyStates(toRecord(states));
+    });
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, []);
+
   const rolePanes: RolePaneConfig[] = config?.panes ?? [];
   const panes = rolePanes.map((pane) => ({
     id: pane.paneId,
@@ -822,7 +847,7 @@ export function App() {
               ) : null}
               <div className="terminal-grid">
                 {panes.map((pane) => (
-                  <AgentPane key={pane.id} {...pane} />
+                  <AgentPane key={pane.id} {...pane} session={ptyStates[pane.id] ?? null} />
                 ))}
               </div>
             </section>
