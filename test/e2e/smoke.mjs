@@ -237,6 +237,35 @@ async function run() {
     }
     log('✓ [5] config-derived panes render the fixture role display names; config loaded.');
 
+    // --- Assertion 5b: rail/config controls are truthful navigation -----------
+    await page.click('button[aria-label="Settings"]');
+    await waitFor(page, 'Settings rail button to open the settings view', () =>
+      Boolean(document.querySelector('section[aria-label="GodMode settings"]')) &&
+      document.querySelector('button[aria-label="Settings"]')?.getAttribute('aria-current') === 'page');
+    const settingsText = await page.locator('section[aria-label="GodMode settings"]').innerText();
+    assert.match(settingsText, /Role configuration/i, 'Settings should render the config surface.');
+    assert.match(settingsText, /Fake Builder/i, 'Settings should show config-derived role bindings.');
+
+    await page.click('button[aria-label="Dashboard"]');
+    await waitFor(page, 'Dashboard rail button to open the dashboard view', () =>
+      Boolean(document.querySelector('section[aria-label="GodMode dashboard"]')) &&
+      document.querySelector('button[aria-label="Dashboard"]')?.getAttribute('aria-current') === 'page');
+
+    await page.click('button[aria-label="Agent workspace"]');
+    await waitFor(page, 'Agent workspace rail button to restore the workspace view', () =>
+      Boolean(document.querySelector('section[aria-label="GodMode agent workspace"]:not([hidden])')) &&
+      document.querySelector('button[aria-label="Agent workspace"]')?.getAttribute('aria-current') === 'page');
+
+    await page.click('button:has-text("Configure")');
+    await waitFor(page, 'Agent Models Configure to open the settings view', () =>
+      Boolean(document.querySelector('section[aria-label="GodMode settings"]')) &&
+      document.querySelector('button[aria-label="Settings"]')?.getAttribute('aria-current') === 'page');
+
+    await page.click('button[aria-label="Agent workspace"]');
+    await waitFor(page, 'workspace to be restored after config navigation', () =>
+      Boolean(document.querySelector('section[aria-label="GodMode agent workspace"]:not([hidden])')));
+    log('✓ [5b] rail buttons and Agent Models Configure navigate visibly with active state.');
+
     // --- Assertion 6: GitHub degradation (gh missing, controlled PATH) --------
     await waitFor(page, 'the GitHub pane to report gh missing', () =>
       document.querySelector('.github-pane .header-chip')?.textContent === 'gh missing');
